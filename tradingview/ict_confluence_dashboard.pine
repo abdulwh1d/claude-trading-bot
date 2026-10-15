@@ -1,0 +1,743 @@
+//@version=6
+indicator("ICT Confluence Dashboard", shorttitle = "ICT Dash", overlay = true, max_boxes_count = 300, max_lines_count = 300, max_labels_count = 300, max_bars_back = 1000)
+
+// ============================================================================
+// ICT Confluence Dashboard
+// Break of structure, the 79% retracement, fair value gaps and inverse FVGs,
+// order flow respected or disrespected, intrabar delta and CVD, relative
+// volume and session timing, for 5-30 minute futures charts (NQ/MNQ, ES/MES,
+// GC/MGC). Signals print on candle close only, so they don't repaint.
+// An engineering tool, not financial advice. History stats ignore fees and
+// slippage.
+// ============================================================================
+
+// ------------------------------------------------------------------ inputs --
+G_S = "Structure"
+swingLen     = input.int(5, "Swing length (bars on each side)", minval = 2, maxval = 20, group = G_S, display = display.none)
+breakOnClose = input.bool(true, "A break needs a candle close beyond the swing", group = G_S, display = display.none)
+showBos      = input.bool(true, "Show BOS / CHoCH", group = G_S, display = display.none)
+
+G_F = "Fibonacci"
+fibLevel   = input.float(0.79, "Entry retracement", minval = 0.5, maxval = 0.95, step = 0.01, group = G_F, display = display.none)
+fibTolAtr  = input.float(0.10, "Touch tolerance (x ATR)", minval = 0.0, step = 0.05, group = G_F, display = display.none)
+showFib    = input.bool(true, "Show the 79% level", group = G_F, display = display.none)
+
+G_G = "Fair value gaps"
+minGapAtr  = input.float(0.15, "Smallest gap (x ATR)", minval = 0.0, step = 0.05, group = G_G, display = display.none)
+maxGaps    = input.int(20, "Gaps to track", minval = 4, maxval = 60, group = G_G, display = display.none)
+maxGapAge  = input.int(400, "Forget gaps older than (bars)", minval = 50, maxval = 2000, group = G_G, display = display.none)
+ofMemory   = input.int(10, "Order-flow memory (events)", minval = 3, maxval = 50, group = G_G, display = display.none)
+maxDrawn   = input.int(6, "Zones to draw (nearest to price)", minval = 1, maxval = 20, group = G_G, display = display.none)
+showFvg    = input.bool(true, "Show FVGs", group = G_G, display = display.none)
+showIfvg   = input.bool(true, "Show inverse FVGs", group = G_G, display = display.none)
+
+G_D = "Delta and volume"
+deltaTf    = input.timeframe("1", "Delta from intrabars of", group = G_D, display = display.none)
+rvolLen    = input.int(20, "Volume average length", minval = 5, group = G_D, display = display.none)
+minRvol    = input.float(1.0, "Relative volume that counts", minval = 0.0, step = 0.1, group = G_D, display = display.none)
+
+G_M = "Timeframes"
+tf1       = input.timeframe("5", "Timeframe 1", group = G_M, display = display.none)
+tf2       = input.timeframe("15", "Timeframe 2", group = G_M, display = display.none)
+tf3       = input.timeframe("30", "Timeframe 3", group = G_M, display = display.none)
+htfFilter = input.string("Timeframe 3", "Trend filter", options = ["Off", "Timeframe 2", "Timeframe 3", "Majority"], group = G_M, display = display.none)
+
+G_T = "Sessions (New York time)"
+useSess    = input.bool(true, "Only signal inside a session", group = G_T, display = display.none)
+sessLdn    = input.session("0200-0500", "London", group = G_T, display = display.none)
+sessNyAm   = input.session("0830-1100", "New York AM", group = G_T, display = display.none)
+sessNyPm   = input.session("1330-1530", "New York PM", group = G_T, display = display.none)
+showSessBg = input.bool(false, "Shade sessions", group = G_T, display = display.none)
+
+G_E = "Entries and exits"
+minScore   = input.int(5, "Minimum score to signal (of 8)", minval = 3, maxval = 8, group = G_E, display = display.none)
+stopAtr    = input.float(0.25, "Stop buffer (x ATR)", minval = 0.0, step = 0.05, group = G_E, display = display.none)
+maxRiskAtr = input.float(3.0, "Skip if the stop is wider than (x ATR)", minval = 0.5, step = 0.25, group = G_E, display = display.none)
+tp1R       = input.float(1.0, "Target 1 (R)", minval = 0.25, step = 0.25, group = G_E, display = display.none)
+tp2R       = input.float(2.0, "Target 2 (R)", minval = 0.5, step = 0.25, group = G_E, display = display.none)
+beAfterTp1 = input.bool(true, "Stop to breakeven after target 1", group = G_E, display = display.none)
+exitOnFlip = input.bool(true, "Exit when structure flips", group = G_E, display = display.none)
+exitOnOf   = input.bool(true, "Exit when order flow is disrespected", group = G_E, display = display.none)
+
+G_V = "Dashboard"
+dashPos  = input.string("Top right", "Position", options = ["Top right", "Top left", "Bottom right", "Bottom left"], group = G_V, display = display.none)
+dashSize = input.string("Small", "Text size", options = ["Tiny", "Small", "Normal"], group = G_V, display = display.none)
+
+// ------------------------------------------------------------------ colors --
+cBull  = color.new(#16a34a, 0)
+cBear  = color.new(#dc2626, 0)
+cNeu   = color.new(#94a3b8, 0)
+cText  = color.new(#e2e8f0, 0)
+cKey   = color.new(#94a3b8, 0)
+cWarn  = color.new(#f59e0b, 0)
+
+// ----------------------------------------------------------------- helpers --
+f_px(float x) =>
+    na(x) ? "–" : str.tostring(x, format.mintick)
+
+f_tf(string tf) =>
+    float mins = str.tonumber(tf)
+    string out = tf
+    if not na(mins)
+        out := mins >= 60 and mins % 60 == 0 ? str.tostring(mins / 60, "#") + "h" : str.tostring(mins, "#") + "m"
+    out
+
+f_arrow(int t) =>
+    t == 1 ? "▲" : t == -1 ? "▼" : "–"
+
+f_color(int t) =>
+    t == 1 ? cBull : t == -1 ? cBear : cNeu
+
+f_check(bool ok) =>
+    ok ? "✓" : "✗"
+
+f_signed(float x, string fmt) =>
+    string s = str.tostring(x, fmt)
+    s := s == "-0" ? "0" : s
+    (x > 0 and s != "0" ? "+" : "") + s
+
+// Market structure for the timeframe rows: 1 after a bullish break, -1 after a bearish one.
+f_structure(int len) =>
+    float hp = ta.pivothigh(high, len, len)
+    float lp = ta.pivotlow(low, len, len)
+    var float sh = na
+    var float sl = na
+    var int t = 0
+    if not na(hp)
+        sh := hp
+    if not na(lp)
+        sl := lp
+    if not na(sh) and close > sh
+        t := 1
+        sh := na
+    if not na(sl) and close < sl
+        t := -1
+        sl := na
+    t
+
+atr  = ta.atr(14)
+mintickSafe = syminfo.mintick > 0 ? syminfo.mintick : 0.01
+
+// ------------------------------------------------- delta from intrabars ---
+// Each intrabar's volume counts as buying if it closed up (or, when flat, above the
+// previous intrabar close) and as selling if it closed down. A close-enough stand-in
+// for real bid/ask delta, which TradingView only exposes on its top plans.
+[ltfO, ltfC, ltfV] = request.security_lower_tf(syminfo.tickerid, deltaTf, [open, close, volume])
+float buyVol  = 0.0
+float sellVol = 0.0
+int nIntra = array.size(ltfV)
+if nIntra > 0
+    for i = 0 to nIntra - 1
+        float o = array.get(ltfO, i)
+        float c = array.get(ltfC, i)
+        float v = nz(array.get(ltfV, i))
+        float pc = i > 0 ? array.get(ltfC, i - 1) : nz(close[1], o)
+        if c > o or (c == o and c > pc)
+            buyVol += v
+        else if c < o or (c == o and c < pc)
+            sellVol += v
+        else
+            buyVol += v * 0.5
+            sellVol += v * 0.5
+else
+    float v0 = nz(volume)
+    if close > open
+        buyVol := v0
+    else if close < open
+        sellVol := v0
+    else
+        buyVol := v0 * 0.5
+        sellVol := v0 * 0.5
+float delta    = buyVol - sellVol
+float deltaPct = nz(volume) > 0 ? delta / volume : 0.0
+
+bool newDay = timeframe.change("D")
+var float cvd = 0.0
+cvd := newDay ? delta : cvd + delta
+var int dayIdx = 0
+if newDay
+    dayIdx += 1
+bool cvdRising  = cvd > cvd[3]
+bool cvdFalling = cvd < cvd[3]
+
+// ------------------------------------------------------------------ volume --
+float volAvg = ta.sma(volume, rvolLen)
+float rvol   = nz(volAvg) > 0 ? volume / volAvg : 0.0
+
+// ---------------------------------------------------------------- sessions --
+bool inLdn  = not na(time(timeframe.period, sessLdn, "America/New_York"))
+bool inNyAm = not na(time(timeframe.period, sessNyAm, "America/New_York"))
+bool inNyPm = not na(time(timeframe.period, sessNyPm, "America/New_York"))
+bool inSess = inLdn or inNyAm or inNyPm
+string sessName = inNyAm ? "New York AM" : inNyPm ? "New York PM" : inLdn ? "London" : "Outside sessions"
+bgcolor(showSessBg and inSess ? color.new(#3b82f6, 93) : na, title = "Sessions")
+
+// --------------------------------------------------------------- structure --
+float ph = ta.pivothigh(high, swingLen, swingLen)
+float pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float swingHigh = na
+var int   swingHighBar = na
+var bool  swingHighTaken = true
+var float swingLow = na
+var int   swingLowBar = na
+var bool  swingLowTaken = true
+var int   trend = 0
+
+if not na(ph)
+    swingHigh := ph
+    swingHighBar := bar_index - swingLen
+    swingHighTaken := false
+if not na(pl)
+    swingLow := pl
+    swingLowBar := bar_index - swingLen
+    swingLowTaken := false
+
+int lenSinceSH = na(swingHighBar) ? 1 : math.max(1, math.min(bar_index - swingHighBar + 1, 500))
+int lenSinceSL = na(swingLowBar) ? 1 : math.max(1, math.min(bar_index - swingLowBar + 1, 500))
+float lowSinceSH   = ta.lowest(low, lenSinceSH)
+int   lowSinceSHAt = ta.lowestbars(low, lenSinceSH)
+float highSinceSL   = ta.highest(high, lenSinceSL)
+int   highSinceSLAt = ta.highestbars(high, lenSinceSL)
+
+float upSrc = breakOnClose ? close : high
+float dnSrc = breakOnClose ? close : low
+bool bullBreak = not swingHighTaken and not na(swingHigh) and upSrc > swingHigh
+bool bearBreak = not swingLowTaken and not na(swingLow) and dnSrc < swingLow
+if bullBreak and bearBreak   // one huge candle through both swings: trust its close
+    bullBreak := close >= open
+    bearBreak := not bullBreak
+
+// The leg the 79% retracement is measured on.
+var int   legDir = 0          // 1 bullish leg (long setups), -1 bearish leg (short setups)
+var float legLow = na
+var float legHigh = na
+var int   legOriginBar = na
+var int   fibTouchBar = na
+bool bullChoch = false
+bool bearChoch = false
+
+if bullBreak
+    bullChoch := trend == -1
+    trend := 1
+    swingHighTaken := true
+    legDir := 1
+    legLow := lowSinceSH
+    legOriginBar := bar_index + lowSinceSHAt
+    legHigh := high
+    fibTouchBar := na
+    if showBos
+        line.new(swingHighBar, swingHigh, bar_index, swingHigh, color = cBull, style = bullChoch ? line.style_dashed : line.style_solid, width = 1)
+        label.new(math.round((swingHighBar + bar_index) / 2), swingHigh, bullChoch ? "CHoCH" : "BOS", style = label.style_label_down, color = color.new(cBull, 100), textcolor = cBull, size = size.tiny)
+if bearBreak
+    bearChoch := trend == 1
+    trend := -1
+    swingLowTaken := true
+    legDir := -1
+    legHigh := highSinceSL
+    legOriginBar := bar_index + highSinceSLAt
+    legLow := low
+    fibTouchBar := na
+    if showBos
+        line.new(swingLowBar, swingLow, bar_index, swingLow, color = cBear, style = bearChoch ? line.style_dashed : line.style_solid, width = 1)
+        label.new(math.round((swingLowBar + bar_index) / 2), swingLow, bearChoch ? "CHoCH" : "BOS", style = label.style_label_up, color = color.new(cBear, 100), textcolor = cBear, size = size.tiny)
+
+// Extend the leg to new extremes until price pulls back to the 79% level.
+if legDir == 1 and not bullBreak and na(fibTouchBar)
+    legHigh := math.max(legHigh, high)
+if legDir == -1 and not bearBreak and na(fibTouchBar)
+    legLow := math.min(legLow, low)
+
+float legRange = legHigh - legLow
+float fib79 = legDir == 1 ? legHigh - fibLevel * legRange : legDir == -1 ? legLow + fibLevel * legRange : na
+float fib50 = (legHigh + legLow) / 2
+float fibTol = fibTolAtr * atr
+bool fibTouchLong  = legDir == 1 and not bullBreak and low <= fib79 + fibTol and close > legLow
+bool fibTouchShort = legDir == -1 and not bearBreak and high >= fib79 - fibTol and close < legHigh
+if fibTouchLong or fibTouchShort
+    fibTouchBar := bar_index
+// A close beyond the leg's origin kills the setup.
+if legDir == 1 and close < legLow
+    legDir := 0
+if legDir == -1 and close > legHigh
+    legDir := 0
+bool fibRecent = not na(fibTouchBar) and bar_index - fibTouchBar <= 3
+bool fibLong  = legDir == 1 and fibRecent and close < fib50
+bool fibShort = legDir == -1 and fibRecent and close > fib50
+
+// ------------------------------------------------ fair value gaps / IFVGs ---
+type Gap
+    float top
+    float bot
+    int   dir       // 1 = support (bullish), -1 = resistance (bearish)
+    bool  inverse   // true once price closed through it and it flipped (IFVG)
+    int   born
+    box   bx
+
+var array<Gap> gaps = array.new<Gap>()
+var array<int> ofEvents = array.new<int>()   // 1 support held, 2 support broken, 3 resistance held, 4 resistance broken
+var int ofScore = 0
+
+f_styleGap(Gap g, bool show) =>
+    if not na(g.bx)
+        color base = g.dir == 1 ? cBull : cBear
+        color clear = color.new(color.black, 100)
+        box.set_bgcolor(g.bx, show ? color.new(base, g.inverse ? 90 : 86) : clear)
+        box.set_border_color(g.bx, show ? color.new(base, g.inverse ? 25 : 65) : clear)
+        box.set_border_style(g.bx, g.inverse ? line.style_dashed : line.style_solid)
+        box.set_text(g.bx, show ? (g.inverse ? "IFVG" : "FVG") : "")
+        box.set_text_color(g.bx, show ? color.new(base, 30) : clear)
+
+bool newBullGap = low > high[2] and (low - high[2]) >= minGapAtr * atr
+bool newBearGap = high < low[2] and (low[2] - high) >= minGapAtr * atr
+
+bool supportHeld   = false
+bool supportBroken = false
+bool resistHeld    = false
+bool resistBroken  = false
+bool supportTouched = false
+bool resistTouched  = false
+float heldZoneBot = na
+float heldZoneTop = na
+int eventsThisBar = 0
+
+if array.size(gaps) > 0
+    for i = array.size(gaps) - 1 to 0
+        Gap g = array.get(gaps, i)
+        if bar_index - g.born > maxGapAge
+            if not na(g.bx)
+                box.set_right(g.bx, bar_index)
+                box.set_extend(g.bx, extend.none)
+            array.remove(gaps, i)
+            continue
+        float mid = (g.top + g.bot) / 2
+        if g.dir == 1
+            if close < g.bot
+                supportBroken := true
+                array.push(ofEvents, 2)
+                ofScore -= 1
+                if g.inverse or not showIfvg
+                    if not na(g.bx)
+                        box.set_right(g.bx, bar_index)
+                        box.set_extend(g.bx, extend.none)
+                    if g.inverse
+                        array.remove(gaps, i)
+                    else
+                        g.dir := -1
+                        g.inverse := true
+                        g.bx := na
+                else
+                    g.dir := -1
+                    g.inverse := true
+                    f_styleGap(g, true)
+            else if low <= g.top
+                supportTouched := true
+                if close > open and close >= mid
+                    supportHeld := true
+                    array.push(ofEvents, 1)
+                    ofScore += 1
+                    heldZoneBot := na(heldZoneBot) ? g.bot : math.min(heldZoneBot, g.bot)
+        else
+            if close > g.top
+                resistBroken := true
+                array.push(ofEvents, 4)
+                ofScore += 1
+                if g.inverse or not showIfvg
+                    if not na(g.bx)
+                        box.set_right(g.bx, bar_index)
+                        box.set_extend(g.bx, extend.none)
+                    if g.inverse
+                        array.remove(gaps, i)
+                    else
+                        g.dir := 1
+                        g.inverse := true
+                        g.bx := na
+                else
+                    g.dir := 1
+                    g.inverse := true
+                    f_styleGap(g, true)
+            else if high >= g.bot
+                resistTouched := true
+                if close < open and close <= mid
+                    resistHeld := true
+                    array.push(ofEvents, 3)
+                    ofScore -= 1
+                    heldZoneTop := na(heldZoneTop) ? g.top : math.max(heldZoneTop, g.top)
+
+// Keep only the most recent order-flow events.
+while array.size(ofEvents) > ofMemory
+    int old = array.shift(ofEvents)
+    ofScore -= (old == 1 or old == 4) ? 1 : -1
+
+// Register the new gaps after checking the old ones, so a gap is never tested on its own candle.
+if newBullGap
+    box b = showFvg ? box.new(bar_index - 2, low, bar_index, high[2], extend = extend.right, text_size = size.tiny, text_halign = text.align_right) : na
+    Gap ng = Gap.new(low, high[2], 1, false, bar_index, b)
+    f_styleGap(ng, true)
+    array.unshift(gaps, ng)
+if newBearGap
+    box b = showFvg ? box.new(bar_index - 2, low[2], bar_index, high, extend = extend.right, text_size = size.tiny, text_halign = text.align_right) : na
+    Gap ng = Gap.new(low[2], high, -1, false, bar_index, b)
+    f_styleGap(ng, true)
+    array.unshift(gaps, ng)
+while array.size(gaps) > maxGaps
+    Gap oldGap = array.pop(gaps)
+    if not na(oldGap.bx)
+        box.set_right(oldGap.bx, bar_index)
+        box.set_extend(oldGap.bx, extend.none)
+
+if barstate.islast and array.size(gaps) > 0
+    array<float> dist = array.new<float>()
+    for i = 0 to array.size(gaps) - 1
+        Gap g = array.get(gaps, i)
+        array.push(dist, close > g.top ? close - g.top : close < g.bot ? g.bot - close : 0.0)
+    array<int> order = array.sort_indices(dist)
+    for k = 0 to array.size(order) - 1
+        f_styleGap(array.get(gaps, array.get(order, k)), k < maxDrawn)
+
+// ---------------------------------------------------------- timeframes ---
+f_mtf(string tf, int chartTrend) =>
+    int sec = timeframe.in_seconds(tf)
+    int chartSec = timeframe.in_seconds(timeframe.period)
+    // Both requests run on every bar (structure needs its full history); the
+    // timeframe comparison then picks the one that fits.
+    // Higher timeframe: last closed bar only, so no repainting and no lookahead.
+    int higher = request.security(syminfo.tickerid, tf, f_structure(swingLen)[1], lookahead = barmerge.lookahead_on)
+    // Lower timeframe: its latest bar inside the current chart bar.
+    int lower = request.security(syminfo.tickerid, tf, f_structure(swingLen))
+    sec == chartSec ? chartTrend : sec > chartSec ? higher : lower
+
+int t1 = f_mtf(tf1, trend)
+int t2 = f_mtf(tf2, trend)
+int t3 = f_mtf(tf3, trend)
+int bullVotes = (t1 == 1 ? 1 : 0) + (t2 == 1 ? 1 : 0) + (t3 == 1 ? 1 : 0)
+int bearVotes = (t1 == -1 ? 1 : 0) + (t2 == -1 ? 1 : 0) + (t3 == -1 ? 1 : 0)
+bool htfLong  = htfFilter == "Off" ? true : htfFilter == "Timeframe 2" ? t2 == 1 : htfFilter == "Timeframe 3" ? t3 == 1 : bullVotes >= 2
+bool htfShort = htfFilter == "Off" ? true : htfFilter == "Timeframe 2" ? t2 == -1 : htfFilter == "Timeframe 3" ? t3 == -1 : bearVotes >= 2
+
+// ---------------------------------------------------- delta divergence ---
+// Price makes a lower low but CVD makes a higher low: selling is being absorbed.
+var float prevPlPrice = na
+var float prevPlCvd = na
+var int   prevPlDay = na
+var int   bullDivBar = na
+var float prevPhPrice = na
+var float prevPhCvd = na
+var int   prevPhDay = na
+var int   bearDivBar = na
+if not na(pl)
+    float cvdAt = cvd[swingLen]
+    int dayAt = dayIdx[swingLen]
+    if not na(prevPlPrice) and dayAt == prevPlDay and pl < prevPlPrice and cvdAt > prevPlCvd
+        bullDivBar := bar_index
+    prevPlPrice := pl
+    prevPlCvd := cvdAt
+    prevPlDay := dayAt
+if not na(ph)
+    float cvdAtH = cvd[swingLen]
+    int dayAtH = dayIdx[swingLen]
+    if not na(prevPhPrice) and dayAtH == prevPhDay and ph > prevPhPrice and cvdAtH < prevPhCvd
+        bearDivBar := bar_index
+    prevPhPrice := ph
+    prevPhCvd := cvdAtH
+    prevPhDay := dayAtH
+bool bullDiv = not na(bullDivBar) and bar_index - bullDivBar <= swingLen * 2
+bool bearDiv = not na(bearDivBar) and bar_index - bearDivBar <= swingLen * 2
+
+// ---------------------------------------------------------------- factors --
+bool fStructL = trend == 1 and htfLong
+bool fStructS = trend == -1 and htfShort
+bool fZoneL   = supportTouched or supportTouched[1]
+bool fZoneS   = resistTouched or resistTouched[1]
+bool fReactL  = supportHeld or (fibLong and close > open and close > fib79)
+bool fReactS  = resistHeld or (fibShort and close < open and close < fib79)
+bool fFlowL   = ofScore > 0
+bool fFlowS   = ofScore < 0
+bool fDeltaL  = delta > 0 and (cvdRising or bullDiv)
+bool fDeltaS  = delta < 0 and (cvdFalling or bearDiv)
+bool fVol     = rvol >= minRvol
+bool fSess    = inSess
+
+int scoreL = (fStructL ? 1 : 0) + (fibLong ? 1 : 0) + (fZoneL ? 1 : 0) + (fReactL ? 1 : 0) + (fFlowL ? 1 : 0) + (fDeltaL ? 1 : 0) + (fVol ? 1 : 0) + (fSess ? 1 : 0)
+int scoreS = (fStructS ? 1 : 0) + (fibShort ? 1 : 0) + (fZoneS ? 1 : 0) + (fReactS ? 1 : 0) + (fFlowS ? 1 : 0) + (fDeltaS ? 1 : 0) + (fVol ? 1 : 0) + (fSess ? 1 : 0)
+
+// Stops sit beyond the reaction candle and the zone it came from.
+float stopL = math.min(low, nz(heldZoneBot, low)) - stopAtr * atr
+float stopS = math.max(high, nz(heldZoneTop, high)) + stopAtr * atr
+float riskL = close - stopL
+float riskS = stopS - close
+bool riskOkL = riskL > mintickSafe and riskL <= maxRiskAtr * atr
+bool riskOkS = riskS > mintickSafe and riskS <= maxRiskAtr * atr
+
+bool setupL = fStructL and (fibLong or fZoneL) and fReactL and (fSess or not useSess) and scoreL >= minScore and riskOkL
+bool setupS = fStructS and (fibShort or fZoneS) and fReactS and (fSess or not useSess) and scoreS >= minScore and riskOkS
+
+// -------------------------------------------------- trades and exits -----
+var int   pos = 0
+var float entryPx = na
+var float stopPx = na
+var float riskPx = na
+var float tp1Px = na
+var float tp2Px = na
+var bool  tp1Done = false
+var int   entryBar = na
+var int   nTrades = 0
+var int   nWins = 0
+var int   nLosses = 0
+var float sumR = 0.0
+var string lastExitWhy = ""
+var float lastExitR = na
+var line  lnStop = na
+var line  lnTp1 = na
+var line  lnTp2 = na
+
+bool longSignal  = false
+bool shortSignal = false
+bool exitLong    = false
+bool exitShort   = false
+bool tp1Long     = false
+bool tp1Short    = false
+string exitWhy = ""
+float exitPx = na
+
+f_factorList(bool st, bool fb, bool zn, bool re, bool fl, bool de, bool vo, bool se) =>
+    "Structure " + f_check(st) + "\nFib 79% " + f_check(fb) + "\nFVG/IFVG " + f_check(zn) + "\nRespected " + f_check(re) + "\nOrder flow " + f_check(fl) + "\nDelta " + f_check(de) + "\nVolume " + f_check(vo) + "\nSession " + f_check(se)
+
+if barstate.isconfirmed
+    bool flatAtStart = pos == 0
+    if pos == 1 and bar_index > entryBar
+        if low <= stopPx
+            exitLong := true
+            exitPx := math.min(stopPx, open)
+            exitWhy := tp1Done and beAfterTp1 ? "Breakeven stop" : "Stop"
+        else if high >= tp2Px
+            exitLong := true
+            exitPx := math.max(tp2Px, open)
+            exitWhy := "Target 2"
+        else
+            if not tp1Done and high >= tp1Px
+                tp1Done := true
+                tp1Long := true
+                if beAfterTp1
+                    stopPx := entryPx
+                    line.set_y1(lnStop, entryPx)
+                    line.set_y2(lnStop, entryPx)
+            if exitOnFlip and bearBreak
+                exitLong := true
+                exitPx := close
+                exitWhy := "Structure flipped"
+            else if exitOnOf and supportBroken
+                exitLong := true
+                exitPx := close
+                exitWhy := "Order flow disrespected"
+    else if pos == -1 and bar_index > entryBar
+        if high >= stopPx
+            exitShort := true
+            exitPx := math.max(stopPx, open)
+            exitWhy := tp1Done and beAfterTp1 ? "Breakeven stop" : "Stop"
+        else if low <= tp2Px
+            exitShort := true
+            exitPx := math.min(tp2Px, open)
+            exitWhy := "Target 2"
+        else
+            if not tp1Done and low <= tp1Px
+                tp1Done := true
+                tp1Short := true
+                if beAfterTp1
+                    stopPx := entryPx
+                    line.set_y1(lnStop, entryPx)
+                    line.set_y2(lnStop, entryPx)
+            if exitOnFlip and bullBreak
+                exitShort := true
+                exitPx := close
+                exitWhy := "Structure flipped"
+            else if exitOnOf and resistBroken
+                exitShort := true
+                exitPx := close
+                exitWhy := "Order flow disrespected"
+
+    if exitLong or exitShort
+        float r = exitLong ? (exitPx - entryPx) / riskPx : (entryPx - exitPx) / riskPx
+        nTrades += 1
+        sumR += r
+        if r > 0.05
+            nWins += 1
+        else if r < -0.05
+            nLosses += 1
+        lastExitWhy := exitWhy
+        lastExitR := r
+        string txt = (exitLong ? "SELL" : "COVER") + "\n" + exitWhy + " " + f_signed(r, "#.##") + "R"
+        label.new(bar_index, exitLong ? high : low, txt, style = exitLong ? label.style_label_down : label.style_label_up, color = r >= 0 ? color.new(cBull, 15) : color.new(cBear, 15), textcolor = color.white, size = size.tiny)
+        line.set_x2(lnStop, bar_index)
+        line.set_x2(lnTp1, bar_index)
+        line.set_x2(lnTp2, bar_index)
+        line.set_extend(lnStop, extend.none)
+        line.set_extend(lnTp1, extend.none)
+        line.set_extend(lnTp2, extend.none)
+        pos := 0
+
+    if tp1Long or tp1Short
+        label.new(bar_index, tp1Long ? high : low, "TP1", style = tp1Long ? label.style_label_down : label.style_label_up, color = color.new(cBull, 40), textcolor = color.white, size = size.tiny)
+
+    if flatAtStart and setupL
+        longSignal := true
+    else if flatAtStart and setupS
+        shortSignal := true
+
+    if longSignal or shortSignal
+        pos := longSignal ? 1 : -1
+        entryPx := close
+        stopPx := longSignal ? stopL : stopS
+        riskPx := longSignal ? riskL : riskS
+        tp1Px := longSignal ? close + tp1R * riskPx : close - tp1R * riskPx
+        tp2Px := longSignal ? close + tp2R * riskPx : close - tp2R * riskPx
+        tp1Done := false
+        entryBar := bar_index
+        string tip = f_factorList(longSignal ? fStructL : fStructS, longSignal ? fibLong : fibShort, longSignal ? fZoneL : fZoneS, longSignal ? fReactL : fReactS, longSignal ? fFlowL : fFlowS, longSignal ? fDeltaL : fDeltaS, fVol, fSess)
+        string sig = (longSignal ? "LONG " : "SHORT ") + f_px(entryPx) + "\nscore " + str.tostring(longSignal ? scoreL : scoreS) + "/8"
+        label.new(bar_index, longSignal ? low : high, sig, style = longSignal ? label.style_label_up : label.style_label_down, color = longSignal ? cBull : cBear, textcolor = color.white, size = size.small, tooltip = tip)
+        lnStop := line.new(bar_index, stopPx, bar_index + 1, stopPx, color = cBear, style = line.style_dotted, extend = extend.right)
+        lnTp1 := line.new(bar_index, tp1Px, bar_index + 1, tp1Px, color = color.new(cBull, 40), style = line.style_dotted, extend = extend.right)
+        lnTp2 := line.new(bar_index, tp2Px, bar_index + 1, tp2Px, color = cBull, style = line.style_dotted, extend = extend.right)
+
+// -------------------------------------------------------------- drawings --
+var line fibLine = na
+var label fibLabel = na
+if barstate.islast and showFib
+    line.delete(fibLine)
+    label.delete(fibLabel)
+    if legDir != 0 and not na(fib79) and not na(legOriginBar)
+        color fc = legDir == 1 ? cBull : cBear
+        fibLine := line.new(legOriginBar, fib79, bar_index + 5, fib79, color = fc, style = line.style_dashed, width = 2)
+        fibLabel := label.new(bar_index + 5, fib79, str.tostring(fibLevel * 100, "#.#") + "%  " + f_px(fib79), style = label.style_label_left, color = color.new(fc, 100), textcolor = fc, size = size.small)
+
+plot(delta, "Bar delta", display = display.data_window)
+plot(cvd, "Session CVD", display = display.data_window)
+plot(rvol, "Relative volume", display = display.data_window)
+
+// ---------------------------------------------------------------- alerts --
+alertcondition(longSignal, "Long signal", "ICT Dash: LONG on {{ticker}} {{interval}} at {{close}}")
+alertcondition(shortSignal, "Short signal", "ICT Dash: SHORT on {{ticker}} {{interval}} at {{close}}")
+alertcondition(exitLong, "Sell (exit long)", "ICT Dash: SELL / exit long on {{ticker}} {{interval}} at {{close}}")
+alertcondition(exitShort, "Cover (exit short)", "ICT Dash: COVER / exit short on {{ticker}} {{interval}} at {{close}}")
+if longSignal or shortSignal
+    alert((longSignal ? "LONG " : "SHORT ") + syminfo.ticker + " " + f_tf(timeframe.period) + " @ " + f_px(entryPx) + " | stop " + f_px(stopPx) + " | TP1 " + f_px(tp1Px) + " | TP2 " + f_px(tp2Px), alert.freq_once_per_bar_close)
+if exitLong or exitShort
+    alert((exitLong ? "SELL " : "COVER ") + syminfo.ticker + " " + f_tf(timeframe.period) + " @ " + f_px(exitPx) + " | " + exitWhy, alert.freq_once_per_bar_close)
+
+// ------------------------------------------------------------- dashboard --
+string tblPos = dashPos == "Top left" ? position.top_left : dashPos == "Bottom right" ? position.bottom_right : dashPos == "Bottom left" ? position.bottom_left : position.top_right
+string txtSize = dashSize == "Tiny" ? size.tiny : dashSize == "Normal" ? size.normal : size.small
+var table dash = table.new(tblPos, 2, 14, bgcolor = color.new(#0b1220, 10), frame_color = color.new(#334155, 0), frame_width = 1, border_color = color.new(#1e293b, 0), border_width = 1)
+
+f_row(int row, string key, string val, color vc, string tip = "") =>
+    table.cell(dash, 0, row, key, text_color = cKey, text_size = txtSize, text_halign = text.align_left)
+    table.cell(dash, 1, row, val, text_color = vc, text_size = txtSize, text_halign = text.align_left, tooltip = tip)
+
+if barstate.islast
+    // Nearest support below / resistance above, FVG or IFVG.
+    float supTop = na
+    float supBot = na
+    bool  supInv = false
+    float resTop = na
+    float resBot = na
+    bool  resInv = false
+    if array.size(gaps) > 0
+        for i = 0 to array.size(gaps) - 1
+            Gap g = array.get(gaps, i)
+            if g.dir == 1 and g.bot <= close and (na(supTop) or g.top > supTop)
+                supTop := g.top
+                supBot := g.bot
+                supInv := g.inverse
+            if g.dir == -1 and g.top >= close and (na(resBot) or g.bot < resBot)
+                resTop := g.top
+                resBot := g.bot
+                resInv := g.inverse
+    int nHeld = 0
+    int nBroken = 0
+    int nResHeld = 0
+    int nResBroken = 0
+    if array.size(ofEvents) > 0
+        for i = 0 to array.size(ofEvents) - 1
+            int e = array.get(ofEvents, i)
+            nHeld += e == 1 ? 1 : 0
+            nBroken += e == 2 ? 1 : 0
+            nResHeld += e == 3 ? 1 : 0
+            nResBroken += e == 4 ? 1 : 0
+
+    table.cell(dash, 0, 0, "ICT Confluence", text_color = cText, text_size = txtSize, text_halign = text.align_left)
+    table.cell(dash, 1, 0, syminfo.ticker + " · " + f_tf(timeframe.period), text_color = cText, text_size = txtSize, text_halign = text.align_left)
+
+    string stTxt = trend == 1 ? "▲ Bullish" : trend == -1 ? "▼ Bearish" : "– No break yet"
+    if trend == 1 and not na(swingLow)
+        stTxt += " · protected low " + f_px(swingLow)
+    if trend == -1 and not na(swingHigh)
+        stTxt += " · protected high " + f_px(swingHigh)
+    f_row(1, "Structure", stTxt, f_color(trend))
+    f_row(2, f_tf(tf1) + " / " + f_tf(tf2) + " / " + f_tf(tf3), f_arrow(t1) + "   " + f_arrow(t2) + "   " + f_arrow(t3), bullVotes >= 2 ? cBull : bearVotes >= 2 ? cBear : cNeu)
+
+    string fibName = str.tostring(fibLevel * 100, "#.#") + "%"
+    string fibTxt = legDir == 0 ? "No active leg" : (fibName + " at " + f_px(fib79) + (fibRecent ? " · tagged ✓" : (legDir == 1 ? (close > fib79 ? " · below price" : " · reached") : (close < fib79 ? " · above price" : " · reached"))))
+    f_row(3, "Fib", fibTxt, legDir == 1 ? cBull : legDir == -1 ? cBear : cNeu)
+
+    string supTxt = na(supTop) ? "none below" : (supInv ? "IFVG " : "FVG ") + f_px(supBot) + " – " + f_px(supTop)
+    string resTxt = na(resBot) ? "none above" : (resInv ? "IFVG " : "FVG ") + f_px(resBot) + " – " + f_px(resTop)
+    f_row(4, "Support", supTxt, cBull)
+    f_row(5, "Resistance", resTxt, cBear)
+
+    string ofTxt = (ofScore > 0 ? "Bullish" : ofScore < 0 ? "Bearish" : "Neutral") + " · " + str.tostring(nHeld + nResBroken) + " bullish vs " + str.tostring(nBroken + nResHeld) + " bearish"
+    string ofTip = "Last " + str.tostring(ofMemory) + " gap reactions\nSupport respected: " + str.tostring(nHeld) + "\nSupport disrespected: " + str.tostring(nBroken) + "\nResistance respected: " + str.tostring(nResHeld) + "\nResistance disrespected: " + str.tostring(nResBroken)
+    f_row(6, "Order flow", ofTxt, ofScore > 0 ? cBull : ofScore < 0 ? cBear : cNeu, ofTip)
+
+    string dTxt = str.tostring(delta, format.volume) + " (" + f_signed(deltaPct * 100, "#") + "%) · CVD " + (cvdRising ? "▲" : cvdFalling ? "▼" : "–") + (bullDiv ? " · bull divergence" : bearDiv ? " · bear divergence" : "")
+    f_row(7, "Delta", dTxt, delta > 0 ? cBull : delta < 0 ? cBear : cNeu)
+    f_row(8, "Volume", str.tostring(rvol, "0.00") + "x average", rvol >= 1.5 ? cWarn : rvol >= minRvol ? cText : cNeu)
+    f_row(9, "Session", sessName + (inSess ? " ✓" : ""), inSess ? cBull : cNeu)
+    f_row(10, "Score long / short", str.tostring(scoreL) + "/8  ·  " + str.tostring(scoreS) + "/8", scoreL >= minScore ? cBull : scoreS >= minScore ? cBear : cText)
+
+    string act = ""
+    color actC = cText
+    string sessTxt = useSess and not inSess ? ", in a session" : ""
+    if pos == 1
+        act := "IN LONG " + f_px(entryPx) + " · stop " + f_px(stopPx) + " · sell at " + f_px(tp1Px) + (tp1Done ? " ✓" : "") + " / " + f_px(tp2Px)
+        actC := cBull
+        if delta < 0 and close < open and rvol >= 1.5
+            act += " · selling pressure"
+            actC := cWarn
+    else if pos == -1
+        act := "IN SHORT " + f_px(entryPx) + " · stop " + f_px(stopPx) + " · cover at " + f_px(tp1Px) + (tp1Done ? " ✓" : "") + " / " + f_px(tp2Px)
+        actC := cBear
+        if delta > 0 and close > open and rvol >= 1.5
+            act += " · buying pressure"
+            actC := cWarn
+    else if exitLong or exitShort
+        act := (exitLong ? "SELL now: " : "COVER now: ") + exitWhy
+        actC := cWarn
+    else if trend == 1 and htfLong
+        bool inSup = not na(supTop) and close <= supTop
+        bool atFibL = legDir == 1 and (fibRecent or close <= fib79 + fibTol)
+        if inSup or atFibL
+            act := "At " + (inSup ? "support " + f_px(supBot) + " – " + f_px(supTop) : fibName + " level " + f_px(fib79)) + ": wait for a bullish close" + sessTxt
+        else
+            act := "Wait for a pullback to " + (legDir == 1 ? f_px(fib79) : "the " + fibName + " level") + (na(supTop) ? "" : " or support " + f_px(supTop)) + sessTxt
+        actC := cBull
+    else if trend == -1 and htfShort
+        bool inRes = not na(resBot) and close >= resBot
+        bool atFibS = legDir == -1 and (fibRecent or close >= fib79 - fibTol)
+        if inRes or atFibS
+            act := "At " + (inRes ? "resistance " + f_px(resBot) + " – " + f_px(resTop) : fibName + " level " + f_px(fib79)) + ": wait for a bearish close" + sessTxt
+        else
+            act := "Wait for a rally to " + (legDir == -1 ? f_px(fib79) : "the " + fibName + " level") + (na(resBot) ? "" : " or resistance " + f_px(resBot)) + sessTxt
+        actC := cBear
+    else if trend == 0
+        act := "Wait: no break of structure yet"
+        actC := cNeu
+    else
+        act := "Stand aside: timeframes disagree"
+        actC := cNeu
+    f_row(11, "Now", act, actC)
+
+    string lastTxt = lastExitWhy == "" ? "none yet" : lastExitWhy + " " + f_signed(lastExitR, "#.##") + "R"
+    f_row(12, "Last exit", lastTxt, na(lastExitR) ? cNeu : lastExitR >= 0 ? cBull : cBear)
+    string histTxt = nTrades == 0 ? "no signals in loaded history" : str.tostring(nTrades) + " trades · " + str.tostring(100.0 * nWins / nTrades, "#") + "% won · avg " + f_signed(sumR / nTrades, "#.##") + "R"
+    f_row(13, "History (no fees)", histTxt, nTrades == 0 ? cNeu : sumR >= 0 ? cBull : cBear)

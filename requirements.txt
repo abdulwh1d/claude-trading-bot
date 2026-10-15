@@ -1,0 +1,6 @@
+anthropic>=1.14.0
+alpaca-py>=0.44.0
+pydantic>=2.7
+requests>=2.31
+tzdata            # time zones on Windows
+pytest>=8         # only for running the tests
