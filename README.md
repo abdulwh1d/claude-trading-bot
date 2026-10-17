@@ -219,9 +219,40 @@ prints on the stop, the second target, a structure flip, or order flow being dis
 support gap closed through while long, a resistance gap while short). The "Now" row says what to
 wait for while you're flat.
 
+**Eight more strategies.** A second panel (bottom left) runs eight playbooks side by side. Each
+takes its own trades on candle close, prints its own small labels (▲ BO, ▼ RG and so on), and
+keeps its own record.
+
+| Strategy | Entry | Stop | Exit |
+|---|---|---|---|
+| Breakout | A close outside a tight 20-bar range (under 3 ATR tall) on 1.5x volume | Inside the range, under the breakout candle | 2R or the range height projected, whichever is further |
+| Pullback | Trend up (structure plus 20 EMA over 50 EMA): a reversal candle at the 20 EMA, the 38–62% zone, or old resistance turned support | Under the last 5 bars | The last swing high |
+| Range | 2+ touches of each side over 40 bars with ADX under 25: a reversal candle or RSI divergence near an edge | Just outside the edge, plus 0.25 ATR | The middle first, then the far edge |
+| Mean reversion | A push outside the Bollinger band (20, 2) with RSI past 30/70, then a close back inside | Beyond the extreme of the push | The band middle (or VWAP) |
+| News | A real move at a usual release time (8:30, 10:00, 14:00 ET): wait 10 minutes, then buy or sell the first pullback | 0.5 ATR beyond the pullback | 0.75R (stop to breakeven), then 1.5R, or out after an hour |
+| Spread | NQ vs ES, or gold vs silver: the price ratio's z-score passes ±2 | z-score past ±3.5 | z-score back to 0. Scored in percent, not R |
+| Scalping | 1–5 minute charts only: 9 EMA over 21 and a break of the last micro swing | 0.5 ATR | 1.25R, or a close back through the 9 EMA |
+| Order flow | Absorption: heavy one-sided delta on high volume at a key level (session high or low, VWAP, the previous POC, a gap) while price doesn't follow, then a close back through that bar | Beyond the absorption bar | VWAP or the point of control, else 2R |
+
+What TradingView can't do, and what stands in for it:
+
+- **Order flow:** there's no order book (DOM), time and sales, or footprint data in Pine on regular plans. Delta comes from 1-minute bars and the volume profile from 1-minute closes.
+- **News:** there's no economic calendar in Pine. It watches the usual release times and only trades when a real move happens there. Check a calendar for the day's events.
+- **Spread:** it shows both legs, but TradingView can't place a two-leg order.
+
+**Best long / short table.** A third table (middle right) shows, for each side, the best plan
+right now: the strategy, entry, stop, exit, reward-to-risk, distance from price, and that
+strategy's record. Every strategy proposes a plan, and the table keeps those within 4 ATR of price
+that offer at least 1R. It then picks the one with the best record on the chart you're looking at.
+Records with few trades are discounted. An open trade always counts. Levels are estimates, not
+orders.
+
+Panel positions, text size, which strategies run and every threshold above are in the
+indicator's settings.
+
 **Alerts.** Create alert → Condition "ICT Confluence Dashboard" → "Any alert() function call".
-One alert then covers entries and exits, with the stop and targets in the message. The four named
-conditions (long, short, sell, cover) work too.
+One alert then covers every entry and exit, ICT and the eight strategies, with the stop and
+target in the message. The named conditions (long, short, sell, cover, strategy entry) work too.
 
 **Data.** On TradingView's free plan, CME and COMEX futures are delayed (the "D" badge on the
 chart). Live signals need TradingView's real-time CME data add-on.
@@ -237,3 +268,7 @@ Oct 15 2026, before fees and slippage:
 
 That's roughly breakeven on the index futures and negative on gold. Use it as a checklist that
 marks the setups, not as proof of an edge.
+
+How far back the records go depends on how much history TradingView loads for the chart. On the
+free plan in October 2026 that was about four weeks on 5 minutes and back to January on 30
+minutes. Each panel prints its start date. Records built on a handful of trades mean little.
