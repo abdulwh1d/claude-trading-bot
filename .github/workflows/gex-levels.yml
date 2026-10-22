@@ -1,8 +1,9 @@
 name: GEX levels
 
 # Every weekday before the US open, pull CBOE's delayed option chains and write
-# gex/latest.txt for the TradingView dashboard. Run it by hand from the Actions tab
-# ("Run workflow") whenever you want fresh levels.
+# gex/latest.txt and gex/history.txt (the one to paste into the TradingView
+# dashboard). Run it by hand from the Actions tab ("Run workflow") whenever you
+# want fresh levels.
 on:
   schedule:
     - cron: "45 12 * * 1-5"   # 8:45 New York in summer, 7:45 in winter

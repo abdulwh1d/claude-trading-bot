@@ -111,6 +111,34 @@ def test_output_line_and_files(tmp_path):
     assert hist == sorted(hist, key=lambda s: s.split(" ")[0])
 
 
+def test_gex_numbers_never_use_exponents():
+    # Pine's str.tonumber can't parse "4e-05", so tiny GLD values must stay plain decimals.
+    assert gex.fmt_gex(10.934) == "+10.9"
+    assert gex.fmt_gex(-4.8) == "-4.8"
+    assert gex.fmt_gex(0.03124) == "+0.0312"
+    assert gex.fmt_gex(-0.00004) == "-0.00004"
+    assert gex.fmt_gex(1234.5) in ("+1234", "+1235")
+    assert gex.fmt_gex(0.0) == "+0"
+    for x in (3e-9, -7.7e-6, 0.5, 12345.678):
+        s = gex.fmt_gex(x)
+        assert "e" not in s.lower() and float(s) == pytest.approx(x, rel=0.01, abs=1e-9)
+
+
+def test_history_fits_in_one_pine_string(tmp_path):
+    path = tmp_path / "history.txt"
+    pad = "k=" + ",".join(f"{7000 + 25 * i}:+1.23" for i in range(15))   # long lines: the cap binds
+    lines = [f"2026-{m:02d}-{d:02d}T08:45 {u} spot=1 flip=1 cw=1 pw=1 total=+1 {pad}"
+             for m in (8, 9) for d in range(1, 29) for u in gex.UNDERLYINGS]
+    gex.merge_history(str(path), lines)
+    text = path.read_text()
+    assert len(text) <= gex.MAX_HISTORY_CHARS
+    kept = text.splitlines()
+    stamps = sorted({ln.split(" ")[0] for ln in kept})
+    assert 20 < len(stamps) < gex.KEEP_RUNS                               # trimmed by size, not count
+    assert kept[-1].startswith("2026-09-28T08:45")                        # newest runs survive
+    assert all(sum(ln.startswith(s) for ln in kept) == len(gex.UNDERLYINGS) for s in stamps)  # whole runs only
+
+
 def test_one_bad_feed_does_not_stop_the_rest(tmp_path):
     src = tmp_path / "chains"
     src.mkdir()

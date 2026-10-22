@@ -23,10 +23,13 @@ converts them to futures prices with the live futures/index ratio):
 
     2026-10-21T08:45 SPX spot=5801.20 flip=5750.50 cw=5900 pw=5700 total=+4.21 k=5800:+3.21,5900:+2.10
 
-GEX values are $ billions per 1% move. Files written:
+GEX values are $ billions per 1% move, to 3 significant figures, never in exponent
+form (Pine's str.tonumber can't read 1e-05). Files written:
 
-    gex/latest.txt     today's lines, for all five underlyings. Paste into the indicator.
-    gex/history.txt    every run, newest last (keeps the last 60 runs per underlying)
+    gex/latest.txt     this run's lines, for all five underlyings
+    gex/history.txt    every run, oldest first: paste this into the indicator. It keeps
+                       the last 40 runs per underlying and stays under 38,000 characters,
+                       since Pine strings stop at 40,960.
 
 Usage:  python gex/gex_levels.py            (fetch from CBOE)
         python gex/gex_levels.py --file chain_dir/  (offline: read SPX.json etc.)
@@ -55,7 +58,8 @@ MAX_DAYS = 60        # expirations included
 WALL_BAND = 0.10     # walls searched within +-10% of spot
 SPIKE_BAND = 0.07    # spikes searched within +-7% of spot
 N_SPIKES = 6
-KEEP_RUNS = 60
+KEEP_RUNS = 40
+MAX_HISTORY_CHARS = 38_000   # Pine strings stop at 40,960 characters
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -173,10 +177,19 @@ def fmt_num(x: float | None) -> str:
     return f"{x:.2f}".rstrip("0").rstrip(".") if abs(x - round(x)) > 1e-9 else str(int(round(x)))
 
 
+def fmt_gex(x: float, sig: int = 3) -> str:
+    """Signed, `sig` significant figures, plain decimals: +10.9, -4.8, +0.0312, +0.00004."""
+    if x == 0 or not math.isfinite(x):
+        return "+0"
+    digits = max(0, min(9, sig - 1 - math.floor(math.log10(abs(x)))))
+    s = f"{x:+.{digits}f}"
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
 def line(stamp: str, name: str, lv: dict) -> str:
-    ks = ",".join(f"{fmt_num(k)}:{g:+.2f}" for k, g in lv["spikes"])
+    ks = ",".join(f"{fmt_num(k)}:{fmt_gex(g)}" for k, g in lv["spikes"])
     return (f"{stamp} {name} spot={lv['spot']:.2f} flip={fmt_num(lv['flip'])} cw={fmt_num(lv['cw'])} "
-            f"pw={fmt_num(lv['pw'])} total={lv['total']:+.2f} k={ks}")
+            f"pw={fmt_num(lv['pw'])} total={fmt_gex(lv['total'])} k={ks}")
 
 
 # -------------------------------------------------------------------- files --
@@ -194,6 +207,10 @@ def merge_history(path: str, new_lines: list[str]) -> None:
     for (stamp, und), ln in sorted(keyed.items()):
         by_und.setdefault(und, []).append(ln)
     kept = sorted((ln for lns in by_und.values() for ln in lns[-KEEP_RUNS:]), key=lambda s: s.split(" ")[0])
+    # Drop the oldest runs until the file fits in one Pine string.
+    while kept and len("\n".join(kept)) + 1 > MAX_HISTORY_CHARS:
+        oldest = kept[0].split(" ")[0]
+        kept = [ln for ln in kept if ln.split(" ")[0] != oldest]
     with open(path, "w") as f:
         f.write("\n".join(kept) + "\n")
 
