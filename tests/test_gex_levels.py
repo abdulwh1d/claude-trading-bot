@@ -1,0 +1,123 @@
+"""GEX levels script: parsing CBOE's format, the math, and the output files."""
+import importlib.util
+import json
+import math
+import os
+from datetime import datetime
+
+import pytest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+spec = importlib.util.spec_from_file_location("gex_levels", os.path.join(HERE, "..", "gex", "gex_levels.py"))
+gex = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gex)
+
+NOW = datetime(2026, 10, 21, 8, 45, tzinfo=gex.NY)
+
+
+def occ(root, expiry, cp, strike):
+    return f"{root}{expiry:%y%m%d}{cp}{int(round(strike * 1000)):08d}"
+
+
+def chain(spot, put_oi, call_oi, strikes, iv=0.2, days=7, root="SPXW"):
+    """A CBOE-shaped payload: heavy puts below spot, heavy calls above."""
+    expiry = datetime(2026, 10, 21 + days)
+    t = days / 365.0
+    opts = []
+    for k in strikes:
+        for cp, oi in (("C", call_oi(k)), ("P", put_oi(k))):
+            opts.append({"option": occ(root, expiry, cp, k), "open_interest": oi, "iv": iv,
+                         "gamma": gex.bs_gamma(spot, k, t, iv)})
+    return {"timestamp": "2026-10-21 08:45:00", "data": {"current_price": spot, "options": opts}}
+
+
+def test_occ_parsing_handles_fractional_strikes_and_weeklies():
+    payload = {"data": {"current_price": 245.3, "options": [
+        {"option": occ("GLD", datetime(2026, 10, 23), "C", 245.5), "open_interest": 10, "iv": 0.2, "gamma": 0.1},
+        {"option": occ("SPXW", datetime(2026, 10, 23), "P", 5800), "open_interest": 5, "iv": 0.2, "gamma": 0.1},
+        {"option": "garbage", "open_interest": 5},
+        {"option": occ("GLD", datetime(2027, 6, 18), "C", 250), "open_interest": 10, "iv": 0.2, "gamma": 0.1},
+        {"option": occ("GLD", datetime(2026, 10, 23), "C", 250), "open_interest": 0, "iv": 0.2, "gamma": 0.1},
+    ]}}
+    spot, rows = gex.parse_chain(payload, NOW)
+    assert spot == 245.3
+    assert [(r["strike"], r["cp"]) for r in rows] == [(245.5, "C"), (5800.0, "P")]   # far expiry and 0 OI dropped
+
+
+def test_contract_gex_sign_and_scale():
+    # 1 call, gamma 0.01, OI 1000, spot 100: 0.01 * 1000 * 100 * 100^2 * 1% = 100,000
+    assert gex.contract_gex(0.01, 1000, 100, "C") == pytest.approx(100_000)
+    assert gex.contract_gex(0.01, 1000, 100, "P") == pytest.approx(-100_000)
+
+
+def test_bs_gamma_matches_closed_form_at_the_money():
+    s = k = 100.0
+    t, iv = 0.25, 0.2
+    d1 = 0.5 * iv * math.sqrt(t)
+    expected = math.exp(-d1 * d1 / 2) / math.sqrt(2 * math.pi) / (s * iv * math.sqrt(t))
+    assert gex.bs_gamma(s, k, t, iv) == pytest.approx(expected)
+
+
+def test_walls_and_flip_land_where_the_open_interest_is():
+    spot = 5800.0
+    strikes = [5600 + 25 * i for i in range(17)]                        # 5600 .. 6000
+    payload = chain(spot,
+                    put_oi=lambda k: 20000 if k == 5700 else (2000 if k < spot else 100),
+                    call_oi=lambda k: 20000 if k == 5900 else (2000 if k > spot else 100),
+                    strikes=strikes)
+    s, rows = gex.parse_chain(payload, NOW)
+    lv = gex.levels(s, rows)
+    assert lv["cw"] == 5900 and lv["pw"] == 5700
+    assert 5700 < lv["flip"] < 5900                                     # balanced book: flip between the walls
+    assert len(lv["spikes"]) == gex.N_SPIKES
+    assert {5700, 5900} <= {k for k, _ in lv["spikes"]}
+
+
+def test_put_heavy_book_puts_the_flip_above_spot():
+    spot = 5800.0
+    strikes = [5600 + 25 * i for i in range(17)]
+    payload = chain(spot, put_oi=lambda k: 8000, call_oi=lambda k: 1000 if k > 5850 else 200, strikes=strikes)
+    s, rows = gex.parse_chain(payload, NOW)
+    lv = gex.levels(s, rows)
+    assert lv["total"] < 0                                               # negative gamma at spot
+    assert lv["flip"] is None or lv["flip"] > spot
+
+
+def test_output_line_and_files(tmp_path):
+    spot = 5800.0
+    strikes = [5600 + 25 * i for i in range(17)]
+    payload = chain(spot, put_oi=lambda k: 3000 if k < spot else 300, call_oi=lambda k: 3000 if k > spot else 300,
+                    strikes=strikes)
+    src = tmp_path / "chains"
+    src.mkdir()
+    for name in gex.UNDERLYINGS:
+        (src / f"{name}.json").write_text(json.dumps(payload))
+    out = tmp_path / "out"
+    assert gex.main(["--file", str(src), "--now", "2026-10-21T08:45", "--out", str(out)]) == 0
+    latest = (out / "latest.txt").read_text().splitlines()
+    assert [ln.split(" ")[1] for ln in latest] == list(gex.UNDERLYINGS)
+    first = latest[0].split(" ")
+    assert first[0] == "2026-10-21T08:45"
+    fields = dict(p.split("=", 1) for p in first[2:])
+    assert set(fields) == {"spot", "flip", "cw", "pw", "total", "k"}
+    for pair in fields["k"].split(","):
+        k, g = pair.split(":")
+        float(k), float(g)
+    # A second run the next day appends; a rerun of the same stamp replaces.
+    gex.main(["--file", str(src), "--now", "2026-10-22T08:45", "--out", str(out)])
+    gex.main(["--file", str(src), "--now", "2026-10-22T08:45", "--out", str(out)])
+    hist = (out / "history.txt").read_text().splitlines()
+    assert len(hist) == 2 * len(gex.UNDERLYINGS)
+    assert hist == sorted(hist, key=lambda s: s.split(" ")[0])
+
+
+def test_one_bad_feed_does_not_stop_the_rest(tmp_path):
+    src = tmp_path / "chains"
+    src.mkdir()
+    good = chain(5800.0, lambda k: 1000, lambda k: 1000, [5700, 5800, 5900])
+    for name in gex.UNDERLYINGS:
+        (src / f"{name}.json").write_text(json.dumps(good) if name != "GLD" else "{}")
+    out = tmp_path / "out"
+    assert gex.main(["--file", str(src), "--now", "2026-10-21T08:45", "--out", str(out)]) == 0
+    names = [ln.split(" ")[1] for ln in (out / "latest.txt").read_text().splitlines()]
+    assert "GLD" not in names and "SPX" in names

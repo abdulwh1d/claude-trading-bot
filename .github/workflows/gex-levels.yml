@@ -1,0 +1,30 @@
+name: GEX levels
+
+# Every weekday before the US open, pull CBOE's delayed option chains and write
+# gex/latest.txt for the TradingView dashboard. Run it by hand from the Actions tab
+# ("Run workflow") whenever you want fresh levels.
+on:
+  schedule:
+    - cron: "45 12 * * 1-5"   # 8:45 New York in summer, 7:45 in winter
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  levels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compute GEX levels from CBOE
+        run: python gex/gex_levels.py
+      - name: Commit the levels
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gex/latest.txt gex/history.txt
+          git diff --cached --quiet || git commit -m "GEX levels $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
