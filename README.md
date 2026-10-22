@@ -204,12 +204,13 @@ GC/MGC on 5 to 30 minute charts. It draws on your chart and fires alerts. It nev
 | Fibonacci 79% | The 79% retracement of the leg that broke structure, drawn as a dashed line. |
 | FVG / IFVG | Three-candle gaps of at least 0.15 ATR. A gap that price closes through flips into an inverse FVG on the other side. Only the 6 nearest are drawn. |
 | Order flow | Each gap tap is *respected* (a reaction candle closes past its midpoint) or *disrespected* (closed through). The last 10 reactions set the bias. |
-| Delta | Built from 1-minute bars inside each candle: up-bar volume counts as buying and down-bar volume as selling. Also shows session CVD and CVD divergence at swings. This approximates bid/ask delta, which TradingView only exposes on its top plans. |
+| Delta | Built from 1-minute bars inside each candle: up-bar volume counts as buying and down-bar volume as selling. This approximates bid/ask delta, which TradingView only exposes on its top plans. It's judged three ways: a z-score against the last 30 bars (past ±1.5 is unusual), the buyers' share of the volume (60%+ means one side dominates), and the CVD trend over 5 bars (net delta the same way on most of them), not single spikes. Also flags CVD divergence at swings. |
+| Flow score | A −1 to +1 composite after [SuperFlow](https://github.com/profitnotiondaily/atasx-superflow), with its weights: absorption, delta z-score, big prints, effort vs result, CVD slope, rolling CVD and volume. ±0.5 is "in control", ±0.2 "leaning". Hover the row for each part. Its footprint-only parts (stacked imbalances, big resting orders) aren't available in Pine. |
+| Big prints | Circles where one 1-minute bar traded 4x the usual 1-minute volume, green if it closed up and red if down. A bar-level stand-in for the trade bubbles of Bookmap-style tools like [OrderFlowMap](https://github.com/Azhagesan-dev/OrderFlowMap). |
 | Volume | Relative to the 20-bar average. |
+| GEX | Dealer gamma levels from the option chains: the gamma flip, the call and put walls, and the biggest GEX strikes. See "GEX levels" below. |
 | Timeframes | 5m, 15m and 30m structure. By default the 30m has to agree with the trade. Higher timeframes only use closed bars, and signals print on candle close, so they don't repaint. |
 | Session | London 02:00–05:00, NY AM 08:30–11:00, NY PM 13:30–15:30, New York time. |
-
-Gamma isn't included.
 
 **Entries and exits.** A LONG or SHORT prints on candle close when structure and the 30m agree,
 price reacts at the 79% level or a gap, it's inside a session, and at least 5 of the 8 factors
@@ -219,9 +220,9 @@ prints on the stop, the second target, a structure flip, or order flow being dis
 support gap closed through while long, a resistance gap while short). The "Now" row says what to
 wait for while you're flat.
 
-**Eight more strategies.** A second panel (bottom left) runs eight playbooks side by side. Each
-takes its own trades on candle close, prints its own small labels (▲ BO, ▼ RG and so on), and
-keeps its own record.
+**Nine more strategies.** Nine playbooks run alongside the ICT signals. Each takes its own trades
+on candle close, prints its own small labels (▲ BO, ▼ RG and so on; hover one for the reason), and
+keeps its own record, which shows in the best long / short table.
 
 | Strategy | Entry | Stop | Exit |
 |---|---|---|---|
@@ -233,6 +234,7 @@ keeps its own record.
 | Spread | NQ vs ES, or gold vs silver: the price ratio's z-score passes ±2 | z-score past ±3.5 | z-score back to 0. Scored in percent, not R |
 | Scalping | 1–5 minute charts only: 9 EMA over 21 and a break of the last micro swing | 0.5 ATR | 1.25R, or a close back through the 9 EMA |
 | Order flow | Absorption: heavy one-sided delta on high volume at a key level (session high or low, VWAP, the previous POC, a gap) while price doesn't follow, then a close back through that bar | Beyond the absorption bar | VWAP or the point of control, else 2R |
+| GEX + order flow | Price tests a GEX level (the flip, a wall or a big strike) and closes back on its side, with absorption on that bar or a delta reversal (sellers dominated the bar before and buyers dominate this one, or the reverse) | Beyond the level, plus 0.25 ATR | The next GEX level at least 1R away, else 2R |
 
 What TradingView can't do, and what stands in for it:
 
@@ -240,18 +242,50 @@ What TradingView can't do, and what stands in for it:
 - **News:** there's no economic calendar in Pine. It watches the usual release times and only trades when a real move happens there. Check a calendar for the day's events.
 - **Spread:** it shows both legs, but TradingView can't place a two-leg order.
 
-**Best long / short table.** A third table (middle right) shows, for each side, the best plan
+**Best long / short table.** A second table (bottom right) shows, for each side, the best plan
 right now: the strategy, entry, stop, exit, reward-to-risk, distance from price, and that
 strategy's record. Every strategy proposes a plan, and the table keeps those within 4 ATR of price
 that offer at least 1R. It then picks the one with the best record on the chart you're looking at.
 Records with few trades are discounted. An open trade always counts. Levels are estimates, not
-orders.
+orders. GEX + order flow proposes a limit entry at the nearest GEX level on each side.
+
+**GEX levels.** Gamma exposure (GEX) estimates where options dealers' hedging pushes price or pins
+it, and order flow shows whether buyers or sellers actually win at those levels. The levels come
+from CBOE's free, delayed option chains: SPX (and SPY) for ES, NDX (and QQQ) for NQ, GLD for gold.
+`gex/gex_levels.py` computes them the way
+[Options-Gamma-Exposure-Analysis-Tool](https://github.com/CodeCraftIA/Options-Gamma-Exposure-Analysis-Tool)
+and [gex-explained](https://github.com/FlashAlpha-lab/gex-explained) do: GEX per contract = gamma ×
+open interest × 100 × spot² × 1%, calls positive and puts negative, expiries up to 60 days out. The
+gamma flip is where total GEX changes sign as spot moves (a Black-Scholes sweep from −10% to +10%).
+The call wall is the strike with the most positive GEX within 10% of spot, the put wall the most
+negative, and the spikes are the six biggest strikes within 7%.
+
+A GitHub Action (`.github/workflows/gex-levels.yml`) runs it every weekday at 12:45 UTC (8:45 ET
+in summer, 7:45 in winter) and commits `gex/latest.txt` and `gex/history.txt`. To refresh by
+hand: Actions → "GEX levels" → "Run workflow". Pine can't download files, so each morning:
+
+1. Open `gex/history.txt` on GitHub and copy all of it.
+2. In the indicator's settings, paste it into "GEX levels (paste gex/history.txt)" under GEX levels.
+
+The levels are in the index's or ETF's own prices. The indicator moves them onto the futures with
+the futures-to-index ratio from regular-hours bars, so futures' premium over the index is taken
+care of. On the chart: the flip is a dashed orange line, the call wall green, the put wall red,
+and the spikes dotted, labeled with their GEX in $ billions per 1% move. The GEX row in the table
+says whether price is above the flip (positive gamma: dealers damp moves, walls tend to hold) or
+below it (negative gamma: dealers amplify moves), and flags levels more than 36 hours old.
+
+history.txt keeps every snapshot (the last 40 runs, under Pine's 40,960-character limit), so the
+GEX + order flow record covers every day since the Action started. There's no free source of past
+GEX, so that record only builds forward from Oct 21 2026: give it a few weeks before trusting it.
+GEX rests on assumptions about who is long and short the options (dealers long calls and short
+puts), the chains are 15 minutes delayed and open interest updates once a day. Both GEX and order
+flow are probabilistic, and order flow is noisy outside liquid sessions.
 
 Panel positions, text size, which strategies run and every threshold above are in the
 indicator's settings.
 
 **Alerts.** Create alert → Condition "ICT Confluence Dashboard" → "Any alert() function call".
-One alert then covers every entry and exit, ICT and the eight strategies, with the stop and
+One alert then covers every entry and exit, ICT and the nine strategies, with the stop and
 target in the message. The named conditions (long, short, sell, cover, strategy entry) work too.
 
 **Data.** On TradingView's free plan, CME and COMEX futures are delayed (the "D" badge on the
@@ -271,4 +305,4 @@ marks the setups, not as proof of an edge.
 
 How far back the records go depends on how much history TradingView loads for the chart. On the
 free plan in October 2026 that was about four weeks on 5 minutes and back to January on 30
-minutes. Each panel prints its start date. Records built on a handful of trades mean little.
+minutes. The History row prints its start date. Records built on a handful of trades mean little.

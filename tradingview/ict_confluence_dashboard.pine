@@ -4,12 +4,15 @@ indicator("ICT Confluence Dashboard", shorttitle = "ICT Dash", overlay = true, m
 // ============================================================================
 // ICT Confluence Dashboard
 // Break of structure, the 79% retracement, fair value gaps and inverse FVGs,
-// order flow respected or disrespected, intrabar delta and CVD, relative
-// volume and session timing, for 5-30 minute futures charts (NQ/MNQ, ES/MES,
-// GC/MGC). Signals print on candle close only, so they don't repaint.
-// A second panel runs eight more playbooks side by side: breakout, pullback,
-// range, mean reversion, news, spread, scalping and order flow, each with its
-// own signals, stop, target and record.
+// order flow respected or disrespected, intrabar delta (judged by z-score, share
+// of volume and the CVD trend), a SuperFlow-style flow score, big prints,
+// relative volume and session timing, for 5-30 minute futures charts (NQ/MNQ,
+// ES/MES, GC/MGC). Signals print on candle close only, so they don't repaint.
+// Nine more playbooks run alongside: breakout, pullback, range, mean reversion,
+// news, spread, scalping, order flow and GEX + order flow, each with its own
+// signals, stop, target and record. A side table shows the best long and short
+// among them. GEX levels (dealer gamma, from gex/gex_levels.py) are drawn when
+// pasted into the settings.
 // An engineering tool, not financial advice. History stats ignore fees and
 // slippage.
 // ============================================================================
@@ -38,6 +41,12 @@ G_D = "Delta and volume"
 deltaTf    = input.timeframe("1", "Delta from intrabars of", group = G_D, display = display.none)
 rvolLen    = input.int(20, "Volume average length", minval = 5, group = G_D, display = display.none)
 minRvol    = input.float(1.0, "Relative volume that counts", minval = 0.0, step = 0.1, group = G_D, display = display.none)
+dzLen      = input.int(30, "Delta z-score lookback (bars)", minval = 10, maxval = 100, group = G_D, display = display.none)
+dzMin      = input.float(1.5, "Unusual delta (z-score)", minval = 0.5, step = 0.1, group = G_D, display = display.none)
+buyDomPct  = input.float(60, "One side dominates at (% of volume)", minval = 51, maxval = 90, step = 1, group = G_D, display = display.none)
+cvdBars    = input.int(5, "CVD trend over (bars)", minval = 2, maxval = 30, group = G_D, display = display.none)
+showBig    = input.bool(true, "Mark big prints", tooltip = "A circle where one intrabar traded far more than usual: green if it closed up, red if down. The closest Pine gets to Bookmap-style trade bubbles.", group = G_D, display = display.none)
+bigMult    = input.float(4.0, "Big print at (x average intrabar volume)", minval = 2.0, step = 0.5, group = G_D, display = display.none)
 
 G_M = "Timeframes"
 tf1       = input.timeframe("5", "Timeframe 1", group = G_M, display = display.none)
@@ -67,10 +76,8 @@ dashPos  = input.string("Top right", "Position", options = ["Top right", "Top le
 dashSize = input.string("Small", "Text size", options = ["Tiny", "Small", "Normal"], group = G_V, display = display.none)
 
 G_X = "Strategies"
-showStrat   = input.bool(true, "Show the strategy panel", group = G_X, display = display.none)
-stratPos    = input.string("Bottom left", "Strategy panel position", options = ["Bottom left", "Bottom right", "Top left", "Top right"], group = G_X, display = display.none)
 showBest    = input.bool(true, "Show the best long / short table", group = G_X, display = display.none)
-bestPos     = input.string("Middle right", "Best long / short table position", options = ["Middle right", "Bottom right", "Middle left", "Top left"], group = G_X, display = display.none)
+bestPos     = input.string("Bottom right", "Best long / short table position", options = ["Bottom right", "Middle right", "Bottom left", "Middle left", "Top left"], group = G_X, display = display.none)
 stratLabels = input.bool(true, "Show strategy signals on the chart", group = G_X, display = display.none)
 minRR       = input.float(1.0, "Skip trades with less reward than (R)", minval = 0.25, step = 0.25, group = G_X, display = display.none)
 useBO = input.bool(true, "Breakout", group = G_X, inline = "s1", display = display.none)
@@ -124,6 +131,14 @@ scTpR     = input.float(1.25, "Target (R)", minval = 0.5, step = 0.25, group = G
 G_X8 = "Order flow"
 ofAbsRvol  = input.float(1.8, "Absorption volume (x average)", minval = 1.0, step = 0.1, group = G_X8, display = display.none)
 ofAbsDelta = input.int(20, "Absorption delta (% of the bar's volume)", minval = 5, maxval = 90, group = G_X8, display = display.none)
+
+G_GX = "GEX levels"
+gexText   = input.text_area("", "GEX levels (paste gex/history.txt)", tooltip = "Copy gex/history.txt from your GitHub repo (updated every weekday morning) and paste it here. It holds every snapshot, so the GEX signal's record covers past days too. gex/latest.txt works as well (today only). Pine reads at most 40,960 characters; history.txt is kept under that.", group = G_GX, display = display.none)
+gexUnd    = input.string("Auto", "Options underlying", options = ["Auto", "SPX", "SPY", "NDX", "QQQ", "GLD"], tooltip = "Auto uses NDX for NQ, SPX for ES and GLD for gold.", group = G_GX, display = display.none)
+showGex   = input.bool(true, "Draw GEX levels", group = G_GX, display = display.none)
+gexSpikes = input.int(6, "GEX spikes to draw", minval = 0, maxval = 6, group = G_GX, display = display.none)
+gexTolAtr = input.float(0.3, "At a GEX level when within (x ATR)", minval = 0.05, step = 0.05, group = G_GX, display = display.none)
+useGX     = input.bool(true, "GEX + order flow signals", group = G_GX, display = display.none)
 
 // ------------------------------------------------------------------ colors --
 cBull  = color.new(#16a34a, 0)
@@ -221,8 +236,47 @@ cvd := newDay ? delta : cvd + delta
 var int dayIdx = 0
 if newDay
     dayIdx += 1
-bool cvdRising  = cvd > cvd[3]
-bool cvdFalling = cvd < cvd[3]
+// Delta judged against its own recent history and against total volume, and the
+// trend of cumulative delta over several bars rather than one spike.
+float buyPct     = buyVol + sellVol > 0 ? 100 * buyVol / (buyVol + sellVol) : 50.0
+float dMean      = ta.sma(delta, dzLen)
+float dSd        = ta.stdev(delta, dzLen)
+float deltaZ     = dSd > 0 ? (delta - dMean) / dSd : 0.0
+bool  buyersDom  = deltaZ >= dzMin or buyPct >= buyDomPct
+bool  sellersDom = deltaZ <= -dzMin or buyPct <= 100 - buyDomPct
+float cvdChg     = math.sum(delta, cvdBars)
+float upBars     = math.sum(delta > 0 ? 1 : 0, cvdBars)
+float downBars   = math.sum(delta < 0 ? 1 : 0, cvdBars)
+bool  cvdRising  = cvdChg > 0 and upBars >= math.ceil(0.6 * cvdBars)
+bool  cvdFalling = cvdChg < 0 and downBars >= math.ceil(0.6 * cvdBars)
+
+// Big prints: intrabars that traded far more than usual, signed by their direction.
+// After the trade bubbles of Bookmap-style tools (Azhagesan-dev/OrderFlowMap) and
+// SuperFlow's big-trades signal, built from intrabars instead of single trades.
+float ltfMean   = nIntra > 0 ? nz(volume) / nIntra : nz(volume)
+float bigRef    = ta.sma(ltfMean, 50)
+float bigThr    = bigMult * nz(bigRef[1], nz(bigRef, ltfMean))
+float btSum     = 0.0
+int   btN       = 0
+float bigBuyPx  = na
+float bigSellPx = na
+float bigBuyV   = 0.0
+float bigSellV  = 0.0
+if nIntra > 0 and bigThr > 0
+    for i = 0 to nIntra - 1
+        float bv = nz(array.get(ltfV, i))
+        if bv >= bigThr
+            float bo = array.get(ltfO, i)
+            float bc = array.get(ltfC, i)
+            float sg = bc > bo ? 1.0 : bc < bo ? -1.0 : 0.0
+            btSum += sg * math.min(1.0, bv / (3 * bigThr))
+            btN += 1
+            if sg > 0 and bv > bigBuyV
+                bigBuyV := bv
+                bigBuyPx := bc
+            else if sg < 0 and bv > bigSellV
+                bigSellV := bv
+                bigSellPx := bc
 
 // ------------------------------------------------------------------ volume --
 float volAvg = ta.sma(volume, rvolLen)
@@ -517,8 +571,8 @@ bool fReactL  = supportHeld or (fibLong and close > open and close > fib79)
 bool fReactS  = resistHeld or (fibShort and close < open and close < fib79)
 bool fFlowL   = ofScore > 0
 bool fFlowS   = ofScore < 0
-bool fDeltaL  = delta > 0 and (cvdRising or bullDiv)
-bool fDeltaS  = delta < 0 and (cvdFalling or bearDiv)
+bool fDeltaL  = buyersDom and (cvdRising or bullDiv)
+bool fDeltaS  = sellersDom and (cvdFalling or bearDiv)
 bool fVol     = rvol >= minRvol
 bool fSess    = inSess
 
@@ -696,6 +750,7 @@ var Strat sNW = Strat.new("NEWS", "News")
 var Strat sSP = Strat.new(code = "SPR", name = "Spread", unit = "%")
 var Strat sSC = Strat.new("SC", "Scalping")
 var Strat sOF = Strat.new("OF", "Order flow")
+var Strat sGX = Strat.new("GEX", "GEX + order flow")
 
 f_open(Strat s, int dir, float sl, float tp1, float tp2, bool be, int maxBars, string tip) =>
     s.dir := dir
@@ -1057,6 +1112,158 @@ else if abDir != 0
 bool ofLong  = abDir == 1 and bar_index > abBar and close > abHi
 bool ofShort = abDir == -1 and bar_index > abBar and close < abLo
 
+// Flow score, after SuperFlow (profitnotiondaily/atasx-superflow): absorption, delta
+// z-score, big prints, effort vs result, CVD slope, rolling CVD and volume, weighted
+// as SuperFlow weights them, from -1 (sellers in control) to +1 (buyers). Its
+// footprint-only parts (stacked imbalances, big resting orders) aren't in Pine.
+float sfVD      = math.max(-1, math.min(1, deltaZ / 3))
+float cvdEma    = ta.ema(delta, 6)
+float cvdEmaMax = math.max(ta.highest(math.abs(cvdEma), 20), 1e-10)
+float sfCvdS0   = math.max(-1, math.min(1, cvdEma / cvdEmaMax))
+bool  sfDiv     = (close > close[1] and sfCvdS0 < -0.1) or (close < close[1] and sfCvdS0 > 0.1)
+float sfCvdS    = sfDiv ? math.max(-1, math.min(1, sfCvdS0 + (close > close[1] ? -0.3 : 0.3))) : sfCvdS0
+f_roll(int p) =>
+    float v = math.sum(volume, p)
+    v > 0 ? math.max(-1, math.min(1, math.sum(delta, p) / v / 0.2)) : 0.0
+float sfR1    = f_roll(5)
+float sfR2    = f_roll(10)
+float sfR3    = f_roll(20)
+bool  sfAgree = (sfR1 > 0 and sfR2 > 0 and sfR3 > 0) or (sfR1 < 0 and sfR2 < 0 and sfR3 < 0)
+float sfCvdR  = math.max(-1, math.min(1, (sfR1 + sfR2 + sfR3) / 3 * (sfAgree ? 1.5 : 1.0)))
+float sfAbs   = absBull ? 1.0 : absBear ? -1.0 : 0.0
+float erVal   = volume / math.max((high - low) / mintickSafe, 0.5)
+float erAvg   = ta.sma(erVal, 20)
+float erRatio = erAvg > 0 ? erVal / erAvg : 1.0
+float sfER    = erRatio > 1.5 ? (close >= open ? -1 : 1) * math.min(1, (erRatio - 1) / 2) : erRatio < 0.67 ? (close >= open ? 1 : -1) * math.min(1, (1 - erRatio) * 1.5) : 0.0
+float sfVol   = math.max(-1, math.min(1, rvol - 1)) * (delta >= 0 ? 1 : -1)
+float sfBT    = btN > 0 ? math.max(-1, math.min(1, btSum / btN)) : 0.0
+float flowScore = rvol < 0.5 ? 0.0 : math.max(-1, math.min(1, (0.15 * sfAbs + 0.15 * sfVD + 0.10 * sfBT + 0.10 * sfER + 0.08 * sfCvdS + 0.07 * sfCvdR + 0.05 * sfVol) / 0.70))
+
+// 9. GEX: dealer gamma levels from CBOE option chains (gex/gex_levels.py runs on
+// GitHub every weekday morning). Pine can't download them, so the lines of
+// gex/latest.txt are pasted into the settings. They come in the options' own prices
+// (SPX, NDX, GLD...) and are moved onto the futures with the futures/underlying
+// ratio from regular-hours bars. Each snapshot applies from its time stamp on.
+type GexSnap
+    int    ts
+    float  spot
+    float  flip
+    float  cw
+    float  pw
+    float  total
+    array<float> ks
+    array<float> gs
+
+f_gnum(string s) =>
+    s == "na" or s == "" ? na : str.tonumber(str.replace_all(s, "+", ""))
+
+string gexAuto   = syminfo.root == "NQ" or syminfo.root == "MNQ" ? "NDX" : syminfo.root == "ES" or syminfo.root == "MES" ? "SPX" : syminfo.root == "GC" or syminfo.root == "MGC" ? "GLD" : ""
+string gexName   = gexUnd == "Auto" ? gexAuto : gexUnd
+string gexTicker = gexName == "SPX" ? "SP:SPX" : gexName == "SPY" ? "AMEX:SPY" : gexName == "NDX" ? "NASDAQ:NDX" : gexName == "QQQ" ? "NASDAQ:QQQ" : gexName == "GLD" ? "AMEX:GLD" : ""
+
+var array<GexSnap> gexSnaps = array.new<GexSnap>()
+if barstate.isfirst and gexName != ""
+    array<string> gexRows = str.split(gexText, "\n")
+    for gl in gexRows
+        array<string> tk = str.split(gl, " ")
+        if array.size(tk) >= 3 and array.get(tk, 1) == gexName and str.length(array.get(tk, 0)) >= 10
+            string st = array.get(tk, 0)
+            int yy = int(str.tonumber(str.substring(st, 0, 4)))
+            int mo = int(str.tonumber(str.substring(st, 5, 7)))
+            int dd = int(str.tonumber(str.substring(st, 8, 10)))
+            int hh = str.length(st) >= 16 ? int(str.tonumber(str.substring(st, 11, 13))) : 9
+            int mi = str.length(st) >= 16 ? int(str.tonumber(str.substring(st, 14, 16))) : 0
+            if not na(yy) and not na(mo) and not na(dd)
+                GexSnap snap = GexSnap.new(timestamp("America/New_York", yy, mo, dd, nz(hh, 9), nz(mi, 0)), na, na, na, na, na, array.new<float>(), array.new<float>())
+                for i = 2 to array.size(tk) - 1
+                    array<string> kv = str.split(array.get(tk, i), "=")
+                    if array.size(kv) == 2
+                        string key = array.get(kv, 0)
+                        string val = array.get(kv, 1)
+                        if key == "spot"
+                            snap.spot := f_gnum(val)
+                        else if key == "flip"
+                            snap.flip := f_gnum(val)
+                        else if key == "cw"
+                            snap.cw := f_gnum(val)
+                        else if key == "pw"
+                            snap.pw := f_gnum(val)
+                        else if key == "total"
+                            snap.total := f_gnum(val)
+                        else if key == "k"
+                            array<string> pairs = str.split(val, ",")
+                            for pr in pairs
+                                array<string> kg = str.split(pr, ":")
+                                if array.size(kg) == 2
+                                    float kk = f_gnum(array.get(kg, 0))
+                                    float gg = f_gnum(array.get(kg, 1))
+                                    if not na(kk) and not na(gg)
+                                        array.push(snap.ks, kk)
+                                        array.push(snap.gs, gg)
+                int at = array.size(gexSnaps)
+                while at > 0 and array.get(gexSnaps, at - 1).ts > snap.ts
+                    at -= 1
+                array.insert(gexSnaps, at, snap)
+
+// Futures/underlying ratio, from regular-hours bars when both trade, smoothed.
+float gexUndC = request.security(gexTicker == "" ? syminfo.tickerid : gexTicker, timeframe.period, close, ignore_invalid_symbol = true)
+bool  inRth   = not na(time(timeframe.period, "0930-1600", "America/New_York"))
+var float gexRatio = na
+if gexTicker != "" and timeframe.isintraday and inRth and gexUndC > 0
+    float rNow = close / gexUndC
+    gexRatio := na(gexRatio) ? rNow : gexRatio + 0.1 * (rNow - gexRatio)
+
+var int gexIdx = -1
+while gexIdx + 1 < array.size(gexSnaps) and array.get(gexSnaps, gexIdx + 1).ts <= time
+    gexIdx += 1
+var int gexSeen = -1
+var int gexStartBar = na
+if gexIdx != gexSeen
+    gexSeen := gexIdx
+    gexStartBar := bar_index
+GexSnap gx = na
+if gexIdx >= 0
+    gx := array.get(gexSnaps, gexIdx)
+bool  gexOn  = not na(gx) and not na(gexRatio)
+float gxFlip = na
+float gxCw   = na
+float gxPw   = na
+array<float> gxLv = array.new<float>()
+if gexOn
+    gxFlip := gx.flip * gexRatio
+    gxCw := gx.cw * gexRatio
+    gxPw := gx.pw * gexRatio
+    if not na(gxFlip)
+        array.push(gxLv, gxFlip)
+    if not na(gxCw)
+        array.push(gxLv, gxCw)
+    if not na(gxPw)
+        array.push(gxLv, gxPw)
+    for kk in gx.ks
+        array.push(gxLv, kk * gexRatio)
+
+// A GEX level tested and held this bar, with absorption or a delta reversal on it.
+float gxTol = gexTolAtr * atr
+float gxSup = na
+float gxRes = na
+for lv in gxLv
+    if low <= lv + gxTol and close > lv and (na(gxSup) or math.abs(close - lv) < math.abs(close - gxSup))
+        gxSup := lv
+    if high >= lv - gxTol and close < lv and (na(gxRes) or math.abs(close - lv) < math.abs(close - gxRes))
+        gxRes := lv
+bool   dRevBull = (deltaZ[1] <= -dzMin or buyPct[1] <= 100 - buyDomPct) and buyersDom
+bool   dRevBear = (deltaZ[1] >= dzMin or buyPct[1] >= buyDomPct) and sellersDom
+bool   gxLong   = not na(gxSup) and (absBull or dRevBull)
+bool   gxShort  = not na(gxRes) and (absBear or dRevBear)
+string gxRegime = na(gxFlip) ? "" : close > gxFlip ? "positive gamma, above the flip" : "negative gamma, below the flip"
+
+f_nextLevel(array<float> lvls, int dir, float entry, float risk) =>
+    float best = na
+    for x in lvls
+        if (x - entry) * dir >= minRR * risk and (na(best) or math.abs(x - entry) < math.abs(best - entry))
+            best := x
+    na(best) ? entry + dir * 2.0 * risk : best
+
 // Entries and exits, on candle close.
 bool anyStratEntry = false
 if barstate.isconfirmed
@@ -1157,7 +1364,60 @@ if barstate.isconfirmed
         alert("Spread: " + legs + " (" + f_tf(timeframe.period) + ") · z " + str.tostring(spZ, "0.0"), alert.freq_once_per_bar_close)
         anyStratEntry := true
 
+    bool flatGX = sGX.dir == 0
+    f_manage(sGX, false, "")
+    if flatGX and useGX and sOk and gexOn and (gxLong or gxShort)
+        int   d   = gxLong ? 1 : -1
+        float lvl = d == 1 ? gxSup : gxRes
+        float sl  = d == 1 ? math.min(low, lvl) - stopAtr * atr : math.max(high, lvl) + stopAtr * atr
+        float rk  = math.abs(close - sl)
+        if rk > mintickSafe and rk <= maxRiskAtr * atr
+            f_open(sGX, d, sl, f_nextLevel(gxLv, d, close, rk), na, false, 0, "GEX level " + f_px(lvl) + " held · " + ((d == 1 ? absBull : absBear) ? "absorption" : "delta reversal") + (gxRegime == "" ? "" : " · " + gxRegime))
+            anyStratEntry := true
+
 alertcondition(anyStratEntry, "Strategy entry (any)", "ICT Dash: a strategy entry fired on {{ticker}} {{interval}}")
+
+// GEX levels on the chart: the flip, the walls and the biggest spikes.
+var array<line>  gxLines  = array.new<line>()
+var array<label> gxLabels = array.new<label>()
+f_gline(float y, color c, int w, string sty, string txt, int x1) =>
+    line ln = line.new(x1, y, bar_index + 8, y, color = c, width = w, style = sty)
+    label lb = label.new(bar_index + 8, y, txt, style = label.style_label_left, color = color.new(c, 100), textcolor = c, size = size.tiny)
+    [ln, lb]
+if barstate.islast
+    for ln in gxLines
+        line.delete(ln)
+    for lb in gxLabels
+        label.delete(lb)
+    array.clear(gxLines)
+    array.clear(gxLabels)
+    if showGex and gexOn
+        int x1 = math.max(nz(gexStartBar, bar_index - 100), bar_index - 300)
+        if not na(gxFlip)
+            [l1, b1] = f_gline(gxFlip, cWarn, 2, line.style_dashed, "γ flip " + f_px(gxFlip), x1)
+            array.push(gxLines, l1)
+            array.push(gxLabels, b1)
+        if not na(gxCw)
+            [l2, b2] = f_gline(gxCw, cBull, 2, line.style_solid, "Call wall " + f_px(gxCw), x1)
+            array.push(gxLines, l2)
+            array.push(gxLabels, b2)
+        if not na(gxPw)
+            [l3, b3] = f_gline(gxPw, cBear, 2, line.style_solid, "Put wall " + f_px(gxPw), x1)
+            array.push(gxLines, l3)
+            array.push(gxLabels, b3)
+        array<float> absg = array.new<float>()
+        for g in gx.gs
+            array.push(absg, math.abs(g))
+        array<int> ord = array.sort_indices(absg, order.descending)
+        int shown = 0
+        for ix in ord
+            float kx = array.get(gx.ks, ix)
+            if shown < gexSpikes and kx != gx.cw and kx != gx.pw
+                float gv = array.get(gx.gs, ix)
+                [l4, b4] = f_gline(kx * gexRatio, gv >= 0 ? color.new(cBull, 30) : color.new(cBear, 30), 1, line.style_dotted, "GEX " + f_signed(gv, "#.###") + "B", x1)
+                array.push(gxLines, l4)
+                array.push(gxLabels, b4)
+                shown += 1
 
 // -------------------------------------------------------------- drawings --
 var line fibLine = na
@@ -1173,6 +1433,8 @@ if barstate.islast and showFib
 plot(delta, "Bar delta", display = display.data_window)
 plot(cvd, "Session CVD", display = display.data_window)
 plot(rvol, "Relative volume", display = display.data_window)
+plotshape(showBig ? bigBuyPx : na, "Big buy print", shape.circle, location.absolute, color.new(cBull, 25), size = size.tiny, display = display.pane)
+plotshape(showBig ? bigSellPx : na, "Big sell print", shape.circle, location.absolute, color.new(cBear, 25), size = size.tiny, display = display.pane)
 
 // ---------------------------------------------------------------- alerts --
 alertcondition(longSignal, "Long signal", "ICT Dash: LONG on {{ticker}} {{interval}} at {{close}}")
@@ -1187,7 +1449,7 @@ if exitLong or exitShort
 // ------------------------------------------------------------- dashboard --
 string tblPos = dashPos == "Top left" ? position.top_left : dashPos == "Bottom right" ? position.bottom_right : dashPos == "Bottom left" ? position.bottom_left : position.top_right
 string txtSize = dashSize == "Tiny" ? size.tiny : dashSize == "Normal" ? size.normal : size.small
-var table dash = table.new(tblPos, 2, 13, bgcolor = color.new(#0b1220, 10), frame_color = color.new(#334155, 0), frame_width = 1, border_color = color.new(#1e293b, 0), border_width = 1)
+var table dash = table.new(tblPos, 2, 15, bgcolor = color.new(#0b1220, 10), frame_color = color.new(#334155, 0), frame_width = 1, border_color = color.new(#1e293b, 0), border_width = 1)
 
 f_row(int row, string key, string val, color vc, string tip = "") =>
     table.cell(dash, 0, row, key, text_color = cKey, text_size = txtSize, text_halign = text.align_left)
@@ -1248,11 +1510,21 @@ if barstate.islast
     string ofTip = "Last " + str.tostring(ofMemory) + " gap reactions\nSupport respected: " + str.tostring(nHeld) + "\nSupport disrespected: " + str.tostring(nBroken) + "\nResistance respected: " + str.tostring(nResHeld) + "\nResistance disrespected: " + str.tostring(nResBroken)
     f_row(6, "Order flow", ofTxt, ofScore > 0 ? cBull : ofScore < 0 ? cBear : cNeu, ofTip)
 
-    string dTxt = str.tostring(delta, format.volume) + " (" + f_signed(deltaPct * 100, "#") + "%) · CVD " + (cvdRising ? "▲" : cvdFalling ? "▼" : "–") + (bullDiv ? " · bull divergence" : bearDiv ? " · bear divergence" : "")
-    f_row(7, "Delta", dTxt, delta > 0 ? cBull : delta < 0 ? cBear : cNeu)
-    f_row(8, "Volume", str.tostring(rvol, "0.00") + "x average", rvol >= 1.5 ? cWarn : rvol >= minRvol ? cText : cNeu)
-    f_row(9, "Session", sessName + (inSess ? " ✓" : ""), inSess ? cBull : cNeu)
-    f_row(10, "Score long / short", str.tostring(scoreL) + "/8  ·  " + str.tostring(scoreS) + "/8", scoreL >= minScore ? cBull : scoreS >= minScore ? cBear : cText)
+    string dTxt = str.tostring(delta, format.volume) + " · z " + f_signed(deltaZ, "0.0") + " · buyers " + str.tostring(buyPct, "#") + "% · CVD " + (cvdRising ? "▲" : cvdFalling ? "▼" : "–") + " " + str.tostring(cvdBars) + " bars" + (bullDiv ? " · bull divergence" : bearDiv ? " · bear divergence" : "")
+    f_row(7, "Delta", dTxt, buyersDom ? cBull : sellersDom ? cBear : cNeu, "Unusual when z is past ±" + str.tostring(dzMin, "0.0") + " against the last " + str.tostring(dzLen) + " bars, or when one side has " + str.tostring(buyDomPct, "#") + "% of the volume. The CVD arrow needs net delta over " + str.tostring(cvdBars) + " bars, most of them the same way.")
+    string flTxt = f_signed(flowScore, "0.00") + (rvol < 0.5 ? " · volume too thin" : flowScore >= 0.5 ? " · buyers in control" : flowScore <= -0.5 ? " · sellers in control" : flowScore >= 0.2 ? " · leaning buyers" : flowScore <= -0.2 ? " · leaning sellers" : " · mixed")
+    string flTip = "Absorption " + f_signed(sfAbs, "0.0") + "\nDelta z " + f_signed(sfVD, "0.00") + "\nBig prints " + f_signed(sfBT, "0.00") + "\nEffort vs result " + f_signed(sfER, "0.00") + "\nCVD slope " + f_signed(sfCvdS, "0.00") + "\nRolling CVD " + f_signed(sfCvdR, "0.00") + "\nVolume " + f_signed(sfVol, "0.00")
+    f_row(8, "Flow score", flTxt, flowScore >= 0.2 ? cBull : flowScore <= -0.2 ? cBear : cNeu, flTip)
+    f_row(9, "Volume", str.tostring(rvol, "0.00") + "x average", rvol >= 1.5 ? cWarn : rvol >= minRvol ? cText : cNeu)
+    string gxTxt = gexName == "" ? "No options mapping for this symbol" : array.size(gexSnaps) == 0 ? "Paste gex/history.txt into the settings" : not gexOn ? "Waiting for a regular-hours bar to line up prices" : (na(gxFlip) ? "No flip found" : (close > gxFlip ? "+γ above flip " : "−γ below flip ") + f_px(gxFlip)) + " · walls " + f_px(gxPw) + " / " + f_px(gxCw) + (not na(gxSup) or not na(gxRes) ? " · at a level" : "")
+    string gxTip = ""
+    if gexOn
+        gxTip := gexName + " snapshot " + str.format_time(gx.ts, "MMM d HH:mm", "America/New_York") + " ET." + (na(gxFlip) ? "" : " Price is " + f_px(math.abs(close - gxFlip)) + (close > gxFlip ? " above" : " below") + " the flip.") + " Total GEX " + f_signed(gx.total, "#.##") + "B per 1% move. Above the flip dealers damp moves (mean reversion, walls hold); below it they amplify them."
+        if time - gx.ts > 36 * 3600000
+            gxTxt += " · old: " + str.format_time(gx.ts, "MMM d", "America/New_York")
+    f_row(10, "GEX", gxTxt, not gexOn or na(gxFlip) ? cNeu : close > gxFlip ? cText : cWarn, gxTip)
+    f_row(11, "Session", sessName + (inSess ? " ✓" : ""), inSess ? cBull : cNeu)
+    f_row(12, "Score long / short", str.tostring(scoreL) + "/8  ·  " + str.tostring(scoreS) + "/8", scoreL >= minScore ? cBull : scoreS >= minScore ? cBear : cText)
 
     string act = ""
     color actC = cText
@@ -1294,64 +1566,15 @@ if barstate.islast
     else
         act := "Stand aside: timeframes disagree"
         actC := cNeu
-    f_row(11, "Now", act, actC)
+    f_row(13, "Now", act, actC)
 
     string lastTxt = lastExitWhy == "" ? "No exits yet" : "Last exit: " + lastExitWhy + " " + f_signed(lastExitR, "#.##") + "R"
     string histTxt = nTrades == 0 ? "no signals " + sinceTxt : str.tostring(nTrades) + " trades " + sinceTxt + " · " + str.tostring(100.0 * nWins / nTrades, "#") + "% won · avg " + f_signed(sumR / nTrades, "#.##") + "R"
-    f_row(12, "History (no fees)", histTxt, nTrades == 0 ? cNeu : sumR >= 0 ? cBull : cBear, lastTxt)
+    f_row(14, "History (no fees)", histTxt, nTrades == 0 ? cNeu : sumR >= 0 ? cBull : cBear, lastTxt)
 
-// --------------------------------------------------------- strategy panel --
-string stratTblPos = stratPos == "Top left" ? position.top_left : stratPos == "Top right" ? position.top_right : stratPos == "Bottom right" ? position.bottom_right : position.bottom_left
-var table stratTbl = table.new(stratTblPos, 3, 9, bgcolor = color.new(#0b1220, 10), frame_color = color.new(#334155, 0), frame_width = 1, border_color = color.new(#1e293b, 0), border_width = 1)
-
+// ------------------------------------------------------------ record text --
 f_rec(Strat s) =>
     s.n == 0 ? "no trades yet" : str.tostring(100.0 * s.wins / s.n, "#") + "% won · " + f_signed(s.totR / s.n, "#.##") + s.unit + " · " + str.tostring(s.n)
-
-f_state(Strat s, bool on, string idle) =>
-    s.dir != 0 ? (s.dir == 1 ? "IN LONG " : "IN SHORT ") + f_px(s.entry) + " · stop " + f_px(s.stop) + " · target " + f_px(na(s.tp2) ? s.tp1 : s.tp2) : not on ? "off" : idle
-
-f_stateC(Strat s, bool on, color idleC) =>
-    s.dir == 1 ? cBull : s.dir == -1 ? cBear : not on ? cNeu : idleC
-
-f_srow(int row, Strat s, string txt, color tc) =>
-    table.cell(stratTbl, 0, row, s.name, text_color = cKey, text_size = txtSize, text_halign = text.align_left)
-    table.cell(stratTbl, 1, row, txt, text_color = tc, text_size = txtSize, text_halign = text.align_left)
-    table.cell(stratTbl, 2, row, f_rec(s), text_color = s.n == 0 ? cNeu : s.totR >= 0 ? cBull : cBear, text_size = txtSize, text_halign = text.align_left, tooltip = s.lastWhy == "" ? "No exits yet" : "Last exit: " + s.lastWhy + " " + f_signed(s.lastR, "#.##") + s.unit)
-
-if barstate.islast and showStrat
-    table.cell(stratTbl, 0, 0, "Strategy", text_color = cText, text_size = txtSize, text_halign = text.align_left)
-    table.cell(stratTbl, 1, 0, "Now", text_color = cText, text_size = txtSize, text_halign = text.align_left)
-    table.cell(stratTbl, 2, 0, "Record " + sinceTxt + " (no fees)", text_color = cText, text_size = txtSize, text_halign = text.align_left)
-
-    string boIdle = boTightNow ? "Range " + f_px(boLoNow) + " – " + f_px(boHiNow) + " · break needs " + str.tostring(boVolMult, "0.0") + "x volume" : "No tight range"
-    f_srow(1, sBO, f_state(sBO, useBO, boIdle), f_stateC(sBO, useBO, boTightNow ? cWarn : cNeu))
-
-    string pbIdle = pbUp ? "Uptrend · buy a dip to " + f_px(pbFast) : pbDn ? "Downtrend · sell a rally to " + f_px(pbFast) : "No clean trend"
-    f_srow(2, sPB, f_state(sPB, usePB, pbIdle), f_stateC(sPB, usePB, pbUp ? cBull : pbDn ? cBear : cNeu))
-
-    string rgIdle = (rgOk ? "Range " + f_px(rgLo) + " – " + f_px(rgHi) : "No range") + " · ADX " + str.tostring(adxV, "#")
-    f_srow(3, sRG, f_state(sRG, useRG, rgIdle), f_stateC(sRG, useRG, rgOk ? cWarn : cNeu))
-
-    string mrIdle = "RSI " + str.tostring(rsi14, "#") + (close > bbUp ? " · above the upper band" : close < bbLo ? " · below the lower band" : " · inside the bands")
-    f_srow(4, sMR, f_state(sMR, useMR, mrIdle), f_stateC(sMR, useMR, close > bbUp or close < bbLo ? cWarn : cNeu))
-
-    int nextE = -1
-    for e in nwMins
-        if e > nyMins and (nextE == -1 or e < nextE)
-            nextE := e
-    string nwNext = not timeframe.isintraday ? "Intraday charts only" : nextE == -1 or not nyWeekday ? "No more release windows today" : "Next window " + f_hhmm(nextE) + " ET" + (nextE - nyMins <= 30 ? " · straddle " + f_px(nwPreLo) + " / " + f_px(nwPreHi) : " · check the calendar")
-    string nwIdle = nwState == 1 ? nwName + " release · waiting " + str.tostring(nwWaitMin) + " min" : nwState == 2 ? nwName + " move " + (nwDir == 1 ? "▲" : "▼") + (nwRetr ? " · wait for a " + (nwDir == 1 ? "bullish" : "bearish") + " close" : " · wait for a pullback") : nwNext
-    f_srow(5, sNW, f_state(sNW, useNW, nwIdle), f_stateC(sNW, useNW, nwState > 0 ? cWarn : cNeu))
-
-    string spLive = (sSP.dir == 1 ? "LONG spread: buy " + syminfo.ticker + ", sell " : "SHORT spread: sell " + syminfo.ticker + ", buy ") + spName + " · z " + str.tostring(spZ, "0.0") + " → 0"
-    string spIdle = spTicker == "" ? "No pair for this symbol" : na(spZ) ? "No data for " + spName : "vs " + spName + " · z " + str.tostring(spZ, "0.0") + " · corr " + str.tostring(spCorr, "0.00")
-    f_srow(6, sSP, sSP.dir != 0 ? spLive : not useSP ? "off" : spIdle, f_stateC(sSP, useSP, not na(spZ) and math.abs(spZ) >= 0.75 * spEntryZ ? cWarn : cNeu))
-
-    string scIdle = not scOk ? "1 to 5 minute charts only" : ema9 > ema21 ? "EMA 9 over 21 ▲ · " + (mHiUsed ? "wait for a new micro high" : "buy a break of " + f_px(mHi)) : "EMA 9 under 21 ▼ · " + (mLoUsed ? "wait for a new micro low" : "sell a break of " + f_px(mLo))
-    f_srow(7, sSC, f_state(sSC, useSC, scIdle), f_stateC(sSC, useSC, not scOk ? cNeu : ema9 > ema21 ? cBull : cBear))
-
-    string ofIdle = "VWAP " + f_px(vwapV) + " · POC " + f_px(poc) + (abDir == 1 ? " · absorption ▲ " + f_px(abLo) + ", buy over " + f_px(abHi) : abDir == -1 ? " · absorption ▼ " + f_px(abHi) + ", sell under " + f_px(abLo) : "")
-    f_srow(8, sOF, f_state(sOF, useOF, ofIdle), f_stateC(sOF, useOF, abDir != 0 ? cWarn : cNeu))
 
 // ------------------------------------------------------- best long / short --
 // Every strategy proposes where it would get in on each side, its stop and its exit.
@@ -1368,7 +1591,7 @@ type Plan
     string rec
     string tip
 
-string bestTblPos = bestPos == "Middle right" ? position.middle_right : bestPos == "Middle left" ? position.middle_left : bestPos == "Top left" ? position.top_left : position.bottom_right
+string bestTblPos = bestPos == "Middle right" ? position.middle_right : bestPos == "Middle left" ? position.middle_left : bestPos == "Top left" ? position.top_left : bestPos == "Bottom left" ? position.bottom_left : position.bottom_right
 var table bestTbl = table.new(bestTblPos, 3, 6, bgcolor = color.new(#0b1220, 10), frame_color = color.new(#334155, 0), frame_width = 1, border_color = color.new(#1e293b, 0), border_width = 1)
 
 f_edge(float tot, int n) =>
@@ -1515,6 +1738,26 @@ if barstate.islast and showBest
         float r = math.max(scStopAtr * atr, mintickSafe * 2)
         float e = mLo - mintickSafe
         f_plan(shorts, -1, "Scalping", e, e + r, e - scTpR * r, "stop", f_edge(sSC.totR, sSC.n), f_rec(sSC), "Sell a break of the micro low " + f_px(mLo), false)
+
+    // GEX + order flow: the nearest GEX level on each side.
+    bool gxLiveL = f_livePlan(longs, sGX, 1)
+    if not gxLiveL and useGX and gexOn
+        float sup = na
+        for x in gxLv
+            if x < close and (na(sup) or x > sup)
+                sup := x
+        if not na(sup)
+            float sl = sup - stopAtr * atr - 0.25 * atr
+            f_plan(longs, 1, "GEX + order flow", sup, sl, f_nextLevel(gxLv, 1, sup, sup - sl), "limit", f_edge(sGX.totR, sGX.n), f_rec(sGX), "Buy absorption or a delta reversal at the GEX level " + f_px(sup) + (gxRegime == "" ? "" : ". Now " + gxRegime), false)
+    bool gxLiveS = f_livePlan(shorts, sGX, -1)
+    if not gxLiveS and useGX and gexOn
+        float res = na
+        for x in gxLv
+            if x > close and (na(res) or x < res)
+                res := x
+        if not na(res)
+            float sl = res + stopAtr * atr + 0.25 * atr
+            f_plan(shorts, -1, "GEX + order flow", res, sl, f_nextLevel(gxLv, -1, res, sl - res), "limit", f_edge(sGX.totR, sGX.n), f_rec(sGX), "Sell absorption or a delta reversal at the GEX level " + f_px(res) + (gxRegime == "" ? "" : ". Now " + gxRegime), false)
 
     Plan bestL = f_pick(longs)
     Plan bestS = f_pick(shorts)
