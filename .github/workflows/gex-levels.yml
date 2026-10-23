@@ -1,16 +1,21 @@
 name: GEX levels
 
-# Every weekday before the US open, pull CBOE's delayed option chains and write
-# gex/latest.txt and gex/history.txt (the one to paste into the TradingView
-# dashboard). Run it by hand from the Actions tab ("Run workflow") whenever you
-# want fresh levels.
+# Pull CBOE's delayed option chains and write gex/latest.txt and gex/history.txt
+# (the one to paste into the TradingView dashboard): once before the US open, then
+# every 30 minutes through the session. Run it by hand from the Actions tab
+# ("Run workflow") whenever you want fresh levels.
 on:
   schedule:
-    - cron: "45 12 * * 1-5"   # 8:45 New York in summer, 7:45 in winter
+    - cron: "45 12 * * 1-5"         # 8:45 New York in summer, 7:45 in winter
+    - cron: "15,45 13-21 * * 1-5"   # every 30 min, covering 9:30-16:00 New York all year
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: gex-levels
+  cancel-in-progress: false
 
 jobs:
   levels:
@@ -27,5 +32,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add gex/latest.txt gex/history.txt
-          git diff --cached --quiet || git commit -m "GEX levels $(date -u +%Y-%m-%dT%H:%MZ)"
+          git diff --cached --quiet && exit 0
+          git commit -m "GEX levels $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull --rebase origin main
           git push

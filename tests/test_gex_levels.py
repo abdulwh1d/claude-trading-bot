@@ -99,7 +99,8 @@ def test_output_line_and_files(tmp_path):
     first = latest[0].split(" ")
     assert first[0] == "2026-10-21T08:45"
     fields = dict(p.split("=", 1) for p in first[2:])
-    assert set(fields) == {"spot", "flip", "cw", "pw", "total", "k"}
+    assert set(fields) == {"spot", "flip", "cw", "pw", "total", "k", "src"}
+    assert fields["src"] == "SPX+SPY"
     for pair in fields["k"].split(","):
         k, g = pair.split(":")
         float(k), float(g)
@@ -134,7 +135,7 @@ def test_history_fits_in_one_pine_string(tmp_path):
     assert len(text) <= gex.MAX_HISTORY_CHARS
     kept = text.splitlines()
     stamps = sorted({ln.split(" ")[0] for ln in kept})
-    assert 20 < len(stamps) < gex.KEEP_RUNS                               # trimmed by size, not count
+    assert 20 < len(stamps) < gex.KEEP_DAYS                               # trimmed by size, not count
     assert kept[-1].startswith("2026-09-28T08:45")                        # newest runs survive
     assert all(sum(ln.startswith(s) for ln in kept) == len(gex.UNDERLYINGS) for s in stamps)  # whole runs only
 
@@ -149,3 +150,37 @@ def test_one_bad_feed_does_not_stop_the_rest(tmp_path):
     assert gex.main(["--file", str(src), "--now", "2026-10-21T08:45", "--out", str(out)]) == 0
     names = [ln.split(" ")[1] for ln in (out / "latest.txt").read_text().splitlines()]
     assert "GLD" not in names and "SPX" in names
+
+
+def test_etf_chain_adds_the_same_dollar_gamma_on_the_index_scale():
+    spot = 5800.0
+    strikes = [5600 + 25 * i for i in range(17)]
+    spx = chain(spot, lambda k: 3000 if k < spot else 300, lambda k: 3000 if k > spot else 300, strikes)
+    _, rows = gex.parse_chain(spx, NOW)
+    ratio = 10.0
+    etf_rows = [dict(r, strike=r["strike"] / ratio, gamma=r["gamma"] * ratio, oi=r["oi"] * ratio) for r in rows]
+    both = rows + gex.rescale(etf_rows, ratio)
+    single = gex.gex_by_strike(spot, rows)
+    double = gex.gex_by_strike(spot, both)
+    for k, g in single.items():
+        assert double[k] == pytest.approx(2 * g)                           # same dollars, same strikes
+    assert gex.total_gex_at(spot, both) == pytest.approx(2 * gex.total_gex_at(spot, rows))
+
+
+def test_strikes_are_bucketed_and_spikes_stay_near_spot():
+    spot = 5800.0
+    strikes = [5500 + 5 * i for i in range(121)]                          # 5500 .. 6100 every 5
+    payload = chain(spot, lambda k: 3000 if k < spot else 300, lambda k: 3000 if k > spot else 300, strikes)
+    s, rows = gex.parse_chain(payload, NOW)
+    lv = gex.levels(s, rows, bucket=25.0)
+    assert all(k % 25 == 0 for k, _ in lv["spikes"])
+    assert all(abs(k / s - 1) <= gex.SPIKE_BAND for k, _ in lv["spikes"])
+    assert abs(lv["cw"] / s - 1) <= gex.WALL_BAND and abs(lv["pw"] / s - 1) <= gex.WALL_BAND
+
+
+def test_history_keeps_todays_intraday_runs_and_one_run_per_earlier_day(tmp_path):
+    path = tmp_path / "history.txt"
+    stamps = ["2026-10-21T08:45", "2026-10-21T12:15", "2026-10-22T08:45", "2026-10-22T09:45", "2026-10-22T10:15"]
+    gex.merge_history(str(path), [f"{st} SPX spot=1 flip=1 cw=1 pw=1 total=+1 k=1:+1" for st in stamps])
+    kept = [ln.split(" ")[0] for ln in path.read_text().splitlines()]
+    assert kept == ["2026-10-21T08:45", "2026-10-22T08:45", "2026-10-22T09:45", "2026-10-22T10:15"]
