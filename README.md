@@ -251,30 +251,39 @@ orders. GEX + order flow proposes a limit entry at the nearest GEX level on each
 
 **GEX levels.** Gamma exposure (GEX) estimates where options dealers' hedging pushes price or pins
 it, and order flow shows whether buyers or sellers actually win at those levels. The levels come
-from CBOE's free, delayed option chains: SPX (and SPY) for ES, NDX (and QQQ) for NQ, GLD for gold.
+from CBOE's free, delayed option chains: SPX plus SPY for ES, NDX plus QQQ for NQ, GLD for gold.
+The ETF's options are moved onto the index's scale with the same dollar gamma and added in, since
+much of the hedging sits there (QQQ's open interest dwarfs NDX's), and strikes are grouped into
+5-point (SPX) and 25-point (NDX) buckets.
 `gex/gex_levels.py` computes them the way
 [Options-Gamma-Exposure-Analysis-Tool](https://github.com/CodeCraftIA/Options-Gamma-Exposure-Analysis-Tool)
 and [gex-explained](https://github.com/FlashAlpha-lab/gex-explained) do: GEX per contract = gamma ×
 open interest × 100 × spot² × 1%, calls positive and puts negative, expiries up to 60 days out. The
 gamma flip is where total GEX changes sign as spot moves (a Black-Scholes sweep from −10% to +10%).
-The call wall is the strike with the most positive GEX within 10% of spot, the put wall the most
-negative, and the spikes are the six biggest strikes within 7%.
+The call wall is the strike with the most positive GEX within 5% of spot, the put wall the most
+negative, and the spikes are the eight biggest strikes within 3%: the range a day trades in.
 
-A GitHub Action (`.github/workflows/gex-levels.yml`) runs it every weekday at 12:45 UTC (8:45 ET
-in summer, 7:45 in winter) and commits `gex/latest.txt` and `gex/history.txt`. To refresh by
-hand: Actions → "GEX levels" → "Run workflow". Pine can't download files, so each morning:
+A GitHub Action (`.github/workflows/gex-levels.yml`) runs it before the open (12:45 UTC) and
+every 30 minutes through the session, and commits `gex/latest.txt` and `gex/history.txt`. To
+refresh by hand: Actions → "GEX levels" → "Run workflow". Pine can't download files, so paste
+before the open and again whenever you want the latest levels (mid-morning and after lunch is
+plenty):
 
 1. Open `gex/history.txt` on GitHub and copy all of it.
 2. In the indicator's settings, paste it into "GEX levels (paste gex/history.txt)" under GEX levels.
 
 The levels are in the index's or ETF's own prices. The indicator moves them onto the futures with
 the futures-to-index ratio from regular-hours bars, so futures' premium over the index is taken
-care of. On the chart: the flip is a dashed orange line, the call wall green, the put wall red,
-and the spikes dotted, labeled with their GEX in $ billions per 1% move. The GEX row in the table
-says whether price is above the flip (positive gamma: dealers damp moves, walls tend to hold) or
-below it (negative gamma: dealers amplify moves), and flags levels more than 36 hours old.
+care of. On the chart: the call wall is a thick green line, the put wall thick red, the flip
+dashed orange, and the spikes dotted, thicker for more gamma. Every label shows the price and the
+GEX in $ billions per 1% move, on a dark background so it reads over candles; spikes too close
+to another level are skipped. Lines start at the day's first snapshot. The GEX row says whether
+price is above the flip (positive gamma: dealers damp moves, walls tend to hold) or below it
+(negative gamma: dealers amplify moves) and gives the next level above and below price; hover it
+for the walls. Levels more than 36 hours old are flagged.
 
-history.txt keeps every snapshot (the last 40 runs, under Pine's 40,960-character limit), so the
+history.txt keeps every run from the latest day and the first run of each earlier day (under
+Pine's 40,960-character limit), so the
 GEX + order flow record covers every day since the Action started. There's no free source of past
 GEX, so that record only builds forward from Oct 21 2026: give it a few weeks before trusting it.
 GEX rests on assumptions about who is long and short the options (dealers long calls and short
