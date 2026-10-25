@@ -1,5 +1,5 @@
 //@version=6
-indicator("ICT Confluence Dashboard", shorttitle = "ICT Dash", overlay = true, max_boxes_count = 300, max_lines_count = 300, max_labels_count = 300, max_bars_back = 1000)
+indicator("ICT Confluence Dashboard", shorttitle = "ICT Dash", overlay = true, max_boxes_count = 300, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1000)
 
 // ============================================================================
 // ICT Confluence Dashboard
@@ -1430,18 +1430,27 @@ alertcondition(anyStratEntry, "Strategy entry (any)", "ICT Dash: a strategy entr
 
 // GEX on the chart: a ladder of every strike within the chosen range of price, green
 // for positive GEX and red for negative, bolder and thicker for more gamma; the walls
-// and the flip on top. The biggest strikes get a label with their price and GEX in
-// $ billions per 1% move, skipping any too close to a label already placed.
+// and the flip on top. Every level is tagged L or S. Walls and green strikes are faded,
+// since dealers damp moves there: buy a hold below price, sell a rejection above. Red
+// strikes and the flip are traded on the break, since dealers push moves through them:
+// sell a break below price, buy a break above. The biggest strikes also show their
+// price and GEX in $ billions per 1% move; hover any tag for the reason.
 var array<line>  gxLines  = array.new<line>()
 var array<label> gxLabels = array.new<label>()
-f_glabel(float y, color c, string txt, string sz) =>
-    label.new(bar_index + 3, y, txt, style = label.style_label_left, color = color.new(#0f172a, 25), textcolor = c, size = sz)
+f_glabel(float y, color c, string txt, string sz, string tip) =>
+    label.new(bar_index + 3, y, txt, style = label.style_label_left, color = color.new(#0f172a, 25), textcolor = c, size = sz, tooltip = tip)
 f_gexAt(GexSnap s, float k) =>
     float out = na
     for [i, kk] in s.ks
         if kk == k
             out := array.get(s.gs, i)
     out
+// L or S at a level, its color and why: fade = buy below price / sell above, else the break.
+f_ls(float y, bool fade) =>
+    bool below = y < close
+    bool isL = fade ? below : not below
+    string why = fade ? (below ? "Support: dealers buy dips here, so price tends to bounce. Buy a hold (absorption or delta flipping up)." : "Resistance: dealers sell rallies here, so price tends to stall. Sell a rejection (absorption or delta flipping down).") : (below ? "Dealers sell into drops here, so a break down tends to keep going. Sell the break." : "Dealers buy into rallies here, so a break up tends to keep going. Buy the break.")
+    [isL ? "L" : "S", isL ? cBull : cBear, why]
 if barstate.islast
     for ln in gxLines
         line.delete(ln)
@@ -1471,20 +1480,27 @@ if barstate.islast
                     int   tr = int(math.round(60 - 60 * math.sqrt(sh)))
                     array.push(gxLines, line.new(x1, y, bar_index + 3, y, color = color.new(gv >= 0 ? cBull : cBear, tr), width = 1 + int(math.round(3 * sh)), style = sh >= 0.15 ? line.style_solid : line.style_dotted))
         array<float> placed = array.new<float>()
+        array<float> tagged = array.new<float>()
         if not na(gxDC) and math.abs(gxDC - close) <= far
             float gc = f_gexAt(gxD, gxD.cw)
+            [ls1, lc1, why1] = f_ls(gxDC, true)
             array.push(gxLines, line.new(x1, gxDC, bar_index + 3, gxDC, color = cBull, width = 3))
-            array.push(gxLabels, f_glabel(gxDC, cBull, "Call wall " + f_px(gxDC) + (na(gc) ? "" : " · " + f_signed(gc, "#.##") + "B"), size.small))
+            array.push(gxLabels, f_glabel(gxDC, lc1, ls1 + "  Call wall " + f_px(gxDC) + (na(gc) ? "" : " · " + f_signed(gc, "#.##") + "B"), size.small, "Call wall, the biggest positive GEX strike. " + why1))
             array.push(placed, gxDC)
+            array.push(tagged, gxDC)
         if not na(gxDP) and math.abs(gxDP - close) <= far
             float gp = f_gexAt(gxD, gxD.pw)
+            [ls2, lc2, why2] = f_ls(gxDP, true)
             array.push(gxLines, line.new(x1, gxDP, bar_index + 3, gxDP, color = cBear, width = 3))
-            array.push(gxLabels, f_glabel(gxDP, cBear, "Put wall " + f_px(gxDP) + (na(gp) ? "" : " · " + f_signed(gp, "#.##") + "B"), size.small))
+            array.push(gxLabels, f_glabel(gxDP, lc2, ls2 + "  Put wall " + f_px(gxDP) + (na(gp) ? "" : " · " + f_signed(gp, "#.##") + "B"), size.small, "Put wall, the biggest negative GEX strike. It usually holds the first test; if it breaks, selling can speed up. " + why2))
             array.push(placed, gxDP)
+            array.push(tagged, gxDP)
         if not na(gxDF) and math.abs(gxDF - close) <= far
+            [ls3, lc3, why3] = f_ls(gxDF, false)
             array.push(gxLines, line.new(x1, gxDF, bar_index + 3, gxDF, color = cWarn, width = 2, style = line.style_dashed))
-            array.push(gxLabels, f_glabel(gxDF, cWarn, "γ flip " + f_px(gxDF) + (close > gxDF ? " · price above (+γ)" : " · price below (−γ)"), size.small))
+            array.push(gxLabels, f_glabel(gxDF, lc3, ls3 + "  γ flip " + f_px(gxDF) + (close > gxDF ? " · price above (+γ)" : " · price below (−γ)"), size.small, "Gamma flip. " + (gxDF > close ? "Reclaiming it moves the market into calmer positive gamma: buy the reclaim." : "Losing it moves the market into faster negative gamma: sell the loss.")))
             array.push(placed, gxDF)
+        // Price and GEX on the biggest strikes, then a plain L or S on every other one.
         array<float> absg = array.new<float>()
         for g in gxD.gs
             array.push(absg, math.abs(g))
@@ -1499,9 +1515,22 @@ if barstate.islast
                         crowded := true
                 if not crowded
                     float gv = array.get(gxD.gs, ix)
-                    array.push(gxLabels, f_glabel(y, gv >= 0 ? cBull : cBear, f_px(y) + " · " + f_signed(gv, "#.##") + "B", size.tiny))
+                    [ls4, lc4, why4] = f_ls(y, gv >= 0)
+                    array.push(gxLabels, f_glabel(y, lc4, ls4 + "  " + f_px(y) + " · " + f_signed(gv, "#.##") + "B", size.tiny, (gv >= 0 ? "Positive GEX. " : "Negative GEX. ") + why4))
                     array.push(placed, y)
+                    array.push(tagged, y)
                     shown += 1
+        for [i, kk] in gxD.ks
+            float y = kk * gexRatio
+            if y >= lo and y <= hi
+                bool done = false
+                for d in tagged
+                    if math.abs(d - y) < syminfo.mintick / 2
+                        done := true
+                if not done
+                    float gv = array.get(gxD.gs, i)
+                    [ls5, lc5, why5] = f_ls(y, gv >= 0)
+                    array.push(gxLabels, f_glabel(y, lc5, ls5, size.tiny, f_px(y) + " · " + f_signed(gv, "#.##") + "B. " + why5))
 
 // -------------------------------------------------------------- drawings --
 var line fibLine = na

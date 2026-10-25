@@ -278,9 +278,18 @@ the futures-to-index ratio from regular-hours bars, so futures' premium over the
 care of. On the chart: every strike within 1.5% of price ("Ladder range" in the settings, up
 to 2%) is a line, green for positive GEX and red for negative, bolder and thicker the more gamma
 it holds (scaled to the 85th percentile in range, so one huge wall doesn't wash the rest out).
-The call wall is a thick green line, the put wall thick red, the flip dashed orange. The 12
-biggest strikes ("GEX levels to label") get a label with the price and GEX in $ billions per 1%
-move; labels too close to another are skipped. Lines start at the day's first snapshot, and the
+The call wall is a thick green line, the put wall thick red, the flip dashed orange. Every
+level carries an L (long) or S (short) tag; hover it for the reason:
+
+| Level | Below price | Above price | Why |
+|---|---|---|---|
+| Walls and green strikes (+GEX) | L: buy a hold | S: sell a rejection | Dealers damp moves there, so price tends to bounce or stall |
+| Red strikes (−GEX) | S: sell the break | L: buy the break | Dealers push moves through them, so breaks tend to keep going |
+| Gamma flip | S: sell the loss | L: buy the reclaim | It separates calm (above) from fast (below) markets |
+
+Wait for order flow at the level (absorption or a delta reversal for a hold, delta driving through
+for a break) before acting on a tag. The 12 biggest strikes ("GEX levels to label") also show
+the price and GEX in $ billions per 1% move. Lines start at the day's first snapshot, and the
 chart always shows the newest snapshot, even one taken over the weekend or before the open. The GEX row says whether
 price is above the flip (positive gamma: dealers damp moves, walls tend to hold) or below it
 (negative gamma: dealers amplify moves) and gives the next level above and below price; hover it
