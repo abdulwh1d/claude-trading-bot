@@ -136,9 +136,10 @@ G_GX = "GEX levels"
 gexText   = input.text_area("", "GEX levels (paste gex/history.txt)", tooltip = "Copy gex/history.txt from your GitHub repo (updated every weekday morning) and paste it here. It holds every snapshot, so the GEX signal's record covers past days too. gex/latest.txt works as well (today only). Pine reads at most 40,960 characters; history.txt is kept under that.", group = G_GX, display = display.none)
 gexUnd    = input.string("Auto", "Options underlying", options = ["Auto", "SPX", "SPY", "NDX", "QQQ", "GLD"], tooltip = "Auto uses NDX for NQ, SPX for ES and GLD for gold.", group = G_GX, display = display.none)
 showGex   = input.bool(true, "Draw GEX levels", group = G_GX, display = display.none)
-gexSpikes = input.int(8, "GEX spikes to draw", minval = 0, maxval = 8, group = G_GX, display = display.none)
+gexSpikes = input.int(12, "GEX levels to label", minval = 0, maxval = 30, tooltip = "The biggest strikes in the ladder get a label with their price and GEX.", group = G_GX, display = display.none)
 gexTolAtr = input.float(0.3, "At a GEX level when within (x ATR)", minval = 0.05, step = 0.05, group = G_GX, display = display.none)
 useGX     = input.bool(true, "GEX + order flow signals", group = G_GX, display = display.none)
+gexRange  = input.float(1.5, "Ladder range (% from price)", minval = 0.25, maxval = 2.0, step = 0.25, tooltip = "Every strike within this distance of price is drawn: green for positive GEX, red for negative, bolder for more. The levels file covers 2%.", group = G_GX, display = display.none)
 
 // ------------------------------------------------------------------ colors --
 cBull  = color.new(#16a34a, 0)
@@ -1220,14 +1221,26 @@ while gexIdx + 1 < array.size(gexSnaps) and array.get(gexSnaps, gexIdx + 1).ts <
 var int gexSeen = -1
 var int gexStartBar = na
 var int gexDayKey = na
+// The signals use the flip, the walls and each snapshot's 8 biggest strikes; the full
+// ladder is only drawn.
+var array<float> gxTopK = array.new<float>()
 if gexIdx != gexSeen
     gexSeen := gexIdx
+    array.clear(gxTopK)
     if gexIdx >= 0
-        int gts = array.get(gexSnaps, gexIdx).ts
+        GexSnap gs0 = array.get(gexSnaps, gexIdx)
+        int gts = gs0.ts
         int dk = year(gts, "America/New_York") * 10000 + month(gts, "America/New_York") * 100 + dayofmonth(gts, "America/New_York")
         if na(gexDayKey) or dk != gexDayKey
             gexDayKey := dk
             gexStartBar := bar_index
+        if array.size(gs0.gs) > 0
+            array<float> ab = array.new<float>()
+            for g in gs0.gs
+                array.push(ab, math.abs(g))
+            array<int> od = array.sort_indices(ab, order.descending)
+            for j = 0 to math.min(8, array.size(od)) - 1
+                array.push(gxTopK, array.get(gs0.ks, array.get(od, j)))
 GexSnap gx = na
 if gexIdx >= 0
     gx := array.get(gexSnaps, gexIdx)
@@ -1246,8 +1259,39 @@ if gexOn
         array.push(gxLv, gxCw)
     if not na(gxPw)
         array.push(gxLv, gxPw)
-    for kk in gx.ks
+    for kk in gxTopK
         array.push(gxLv, kk * gexRatio)
+
+// What the chart shows: on the last bar, the newest snapshot even if it was taken after
+// that bar (a weekend or pre-market run), so the levels on screen are always the latest.
+// The signals above stick to the snapshot in force at each bar.
+GexSnap gxD = gx
+float gxDF = gxFlip
+float gxDC = gxCw
+float gxDP = gxPw
+array<float> gxDLv = gxLv
+if barstate.islast and array.size(gexSnaps) > 0 and not na(gexRatio)
+    GexSnap nw = array.last(gexSnaps)
+    if na(gx) or nw.ts > gx.ts
+        gxD := nw
+        gxDF := nw.flip * gexRatio
+        gxDC := nw.cw * gexRatio
+        gxDP := nw.pw * gexRatio
+        gxDLv := array.new<float>()
+        if not na(gxDF)
+            array.push(gxDLv, gxDF)
+        if not na(gxDC)
+            array.push(gxDLv, gxDC)
+        if not na(gxDP)
+            array.push(gxDLv, gxDP)
+        if array.size(nw.gs) > 0
+            array<float> ab2 = array.new<float>()
+            for g in nw.gs
+                array.push(ab2, math.abs(g))
+            array<int> od2 = array.sort_indices(ab2, order.descending)
+            for j = 0 to math.min(8, array.size(od2)) - 1
+                array.push(gxDLv, array.get(nw.ks, array.get(od2, j)) * gexRatio)
+bool gexShowOn = not na(gxD) and not na(gexRatio)
 
 // A GEX level tested and held this bar, with absorption or a delta reversal on it.
 float gxTol = gexTolAtr * atr
@@ -1384,15 +1428,14 @@ if barstate.isconfirmed
 
 alertcondition(anyStratEntry, "Strategy entry (any)", "ICT Dash: a strategy entry fired on {{ticker}} {{interval}}")
 
-// GEX levels on the chart: walls solid, the flip dashed, spikes dotted, thicker for
-// more gamma. Labels give the price and the GEX in $ billions per 1% move. A spike
-// within 0.2 ATR of a level already drawn is skipped, so labels don't pile up.
+// GEX on the chart: a ladder of every strike within the chosen range of price, green
+// for positive GEX and red for negative, bolder and thicker for more gamma; the walls
+// and the flip on top. The biggest strikes get a label with their price and GEX in
+// $ billions per 1% move, skipping any too close to a label already placed.
 var array<line>  gxLines  = array.new<line>()
 var array<label> gxLabels = array.new<label>()
-f_gline(float y, color c, int w, string sty, string txt, int x1, string sz) =>
-    line ln = line.new(x1, y, bar_index + 12, y, color = c, width = w, style = sty)
-    label lb = label.new(bar_index + 12, y, txt, style = label.style_label_left, color = color.new(#0f172a, 25), textcolor = c, size = sz)
-    [ln, lb]
+f_glabel(float y, color c, string txt, string sz) =>
+    label.new(bar_index + 3, y, txt, style = label.style_label_left, color = color.new(#0f172a, 25), textcolor = c, size = sz)
 f_gexAt(GexSnap s, float k) =>
     float out = na
     for [i, kk] in s.ks
@@ -1406,47 +1449,59 @@ if barstate.islast
         label.delete(lb)
     array.clear(gxLines)
     array.clear(gxLabels)
-    if showGex and gexOn
-        int x1 = math.max(nz(gexStartBar, bar_index - 100), bar_index - 300)
-        array<float> drawn = array.new<float>()
-        if not na(gxCw)
-            float gc = f_gexAt(gx, gx.cw)
-            [l1, b1] = f_gline(gxCw, cBull, 3, line.style_solid, "Call wall " + f_px(gxCw) + (na(gc) ? "" : " · " + f_signed(gc, "#.##") + "B"), x1, size.small)
-            array.push(gxLines, l1)
-            array.push(gxLabels, b1)
-            array.push(drawn, gxCw)
-        if not na(gxPw)
-            float gp = f_gexAt(gx, gx.pw)
-            [l2, b2] = f_gline(gxPw, cBear, 3, line.style_solid, "Put wall " + f_px(gxPw) + (na(gp) ? "" : " · " + f_signed(gp, "#.##") + "B"), x1, size.small)
-            array.push(gxLines, l2)
-            array.push(gxLabels, b2)
-            array.push(drawn, gxPw)
-        if not na(gxFlip)
-            [l3, b3] = f_gline(gxFlip, cWarn, 2, line.style_dashed, "γ flip " + f_px(gxFlip) + (close > gxFlip ? " · price above (+γ)" : " · price below (−γ)"), x1, size.small)
-            array.push(gxLines, l3)
-            array.push(gxLabels, b3)
-            array.push(drawn, gxFlip)
-        float gMax = 0.0
+    if showGex and gexShowOn
+        int   x1  = math.max(nz(gexStartBar, bar_index - 100), bar_index - 300)
+        float lo  = close * (1 - gexRange / 100)
+        float hi  = close * (1 + gexRange / 100)
+        float far = close * 2 * gexRange / 100
+        // Strength is scaled to the 85th percentile of the strikes in range, so one huge
+        // wall doesn't wash out every other level.
+        array<float> inRange = array.new<float>()
+        for [i, kk] in gxD.ks
+            float y = kk * gexRatio
+            if y >= lo and y <= hi
+                array.push(inRange, math.abs(array.get(gxD.gs, i)))
+        float gMax = array.size(inRange) > 0 ? array.percentile_nearest_rank(inRange, 85) : 0.0
+        if gMax > 0
+            for [i, kk] in gxD.ks
+                float y = kk * gexRatio
+                if y >= lo and y <= hi
+                    float gv = array.get(gxD.gs, i)
+                    float sh = math.min(1.0, math.abs(gv) / gMax)
+                    int   tr = int(math.round(60 - 60 * math.sqrt(sh)))
+                    array.push(gxLines, line.new(x1, y, bar_index + 3, y, color = color.new(gv >= 0 ? cBull : cBear, tr), width = 1 + int(math.round(3 * sh)), style = sh >= 0.15 ? line.style_solid : line.style_dotted))
+        array<float> placed = array.new<float>()
+        if not na(gxDC) and math.abs(gxDC - close) <= far
+            float gc = f_gexAt(gxD, gxD.cw)
+            array.push(gxLines, line.new(x1, gxDC, bar_index + 3, gxDC, color = cBull, width = 3))
+            array.push(gxLabels, f_glabel(gxDC, cBull, "Call wall " + f_px(gxDC) + (na(gc) ? "" : " · " + f_signed(gc, "#.##") + "B"), size.small))
+            array.push(placed, gxDC)
+        if not na(gxDP) and math.abs(gxDP - close) <= far
+            float gp = f_gexAt(gxD, gxD.pw)
+            array.push(gxLines, line.new(x1, gxDP, bar_index + 3, gxDP, color = cBear, width = 3))
+            array.push(gxLabels, f_glabel(gxDP, cBear, "Put wall " + f_px(gxDP) + (na(gp) ? "" : " · " + f_signed(gp, "#.##") + "B"), size.small))
+            array.push(placed, gxDP)
+        if not na(gxDF) and math.abs(gxDF - close) <= far
+            array.push(gxLines, line.new(x1, gxDF, bar_index + 3, gxDF, color = cWarn, width = 2, style = line.style_dashed))
+            array.push(gxLabels, f_glabel(gxDF, cWarn, "γ flip " + f_px(gxDF) + (close > gxDF ? " · price above (+γ)" : " · price below (−γ)"), size.small))
+            array.push(placed, gxDF)
         array<float> absg = array.new<float>()
-        for g in gx.gs
+        for g in gxD.gs
             array.push(absg, math.abs(g))
-            gMax := math.max(gMax, math.abs(g))
         array<int> ord = array.sort_indices(absg, order.descending)
         int shown = 0
         for ix in ord
-            float y = array.get(gx.ks, ix) * gexRatio
-            bool crowded = false
-            for d in drawn
-                if math.abs(d - y) <= 0.2 * atr
-                    crowded := true
-            if shown < gexSpikes and not crowded
-                float gv = array.get(gx.gs, ix)
-                int w = gMax > 0 ? 1 + int(math.round(2 * math.abs(gv) / gMax)) : 1
-                [l4, b4] = f_gline(y, color.new(gv >= 0 ? cBull : cBear, 15), w, line.style_dotted, f_px(y) + " · " + f_signed(gv, "#.##") + "B", x1, size.tiny)
-                array.push(gxLines, l4)
-                array.push(gxLabels, b4)
-                array.push(drawn, y)
-                shown += 1
+            float y = array.get(gxD.ks, ix) * gexRatio
+            if shown < gexSpikes and y >= lo and y <= hi
+                bool crowded = false
+                for d in placed
+                    if math.abs(d - y) <= 0.5 * atr
+                        crowded := true
+                if not crowded
+                    float gv = array.get(gxD.gs, ix)
+                    array.push(gxLabels, f_glabel(y, gv >= 0 ? cBull : cBear, f_px(y) + " · " + f_signed(gv, "#.##") + "B", size.tiny))
+                    array.push(placed, y)
+                    shown += 1
 
 // -------------------------------------------------------------- drawings --
 var line fibLine = na
@@ -1561,18 +1616,18 @@ if barstate.islast
     f_row(9, "Volume", str.tostring(rvol, "0.00") + "x average", rvol >= 1.5 ? cWarn : rvol >= minRvol ? cText : cNeu)
     float gxUp = na
     float gxDn = na
-    for lv in gxLv
+    for lv in gxDLv
         if lv > close and (na(gxUp) or lv < gxUp)
             gxUp := lv
         if lv < close and (na(gxDn) or lv > gxDn)
             gxDn := lv
-    string gxTxt = gexName == "" ? "No options mapping for this symbol" : array.size(gexSnaps) == 0 ? "Paste gex/history.txt into the settings" : not gexOn ? "Waiting for a regular-hours bar to line up prices" : (na(gxFlip) ? "No flip" : (close > gxFlip ? "+γ above flip " : "−γ below flip ") + f_px(gxFlip)) + " · next ↑ " + f_px(gxUp) + " ↓ " + f_px(gxDn) + (not na(gxSup) or not na(gxRes) ? " · at a level" : "")
+    string gxTxt = gexName == "" ? "No options mapping for this symbol" : array.size(gexSnaps) == 0 ? "Paste gex/history.txt into the settings" : not gexShowOn ? "Waiting for a regular-hours bar to line up prices" : (na(gxDF) ? "No flip" : (close > gxDF ? "+γ above flip " : "−γ below flip ") + f_px(gxDF)) + " · next ↑ " + f_px(gxUp) + " ↓ " + f_px(gxDn) + (not na(gxSup) or not na(gxRes) ? " · at a level" : "")
     string gxTip = ""
-    if gexOn
-        gxTip := gexName + " snapshot " + str.format_time(gx.ts, "MMM d HH:mm", "America/New_York") + " ET." + (na(gxFlip) ? "" : " Price is " + f_px(math.abs(close - gxFlip)) + (close > gxFlip ? " above" : " below") + " the flip.") + " Walls: put " + f_px(gxPw) + ", call " + f_px(gxCw) + ". Total GEX " + f_signed(gx.total, "#.##") + "B per 1% move. Above the flip dealers damp moves (mean reversion, walls hold); below it they amplify them."
-        if time - gx.ts > 36 * 3600000
-            gxTxt += " · old: " + str.format_time(gx.ts, "MMM d", "America/New_York")
-    f_row(10, "GEX", gxTxt, not gexOn or na(gxFlip) ? cNeu : close > gxFlip ? cText : cWarn, gxTip)
+    if gexShowOn
+        gxTip := gexName + " snapshot " + str.format_time(gxD.ts, "MMM d HH:mm", "America/New_York") + " ET." + (na(gxDF) ? "" : " Price is " + f_px(math.abs(close - gxDF)) + (close > gxDF ? " above" : " below") + " the flip.") + " Walls: put " + f_px(gxDP) + ", call " + f_px(gxDC) + ". Total GEX " + f_signed(gxD.total, "#.##") + "B per 1% move. Above the flip dealers damp moves (mean reversion, walls hold); below it they amplify them."
+        if time - gxD.ts > 36 * 3600000
+            gxTxt += " · old: " + str.format_time(gxD.ts, "MMM d", "America/New_York")
+    f_row(10, "GEX", gxTxt, not gexShowOn or na(gxDF) ? cNeu : close > gxDF ? cText : cWarn, gxTip)
     f_row(11, "Session", sessName + (inSess ? " ✓" : ""), inSess ? cBull : cNeu)
     f_row(12, "Score long / short", str.tostring(scoreL) + "/8  ·  " + str.tostring(scoreS) + "/8", scoreL >= minScore ? cBull : scoreS >= minScore ? cBear : cText)
 
@@ -1791,23 +1846,23 @@ if barstate.islast and showBest
 
     // GEX + order flow: the nearest GEX level on each side.
     bool gxLiveL = f_livePlan(longs, sGX, 1)
-    if not gxLiveL and useGX and gexOn
+    if not gxLiveL and useGX and gexShowOn
         float sup = na
-        for x in gxLv
+        for x in gxDLv
             if x < close and (na(sup) or x > sup)
                 sup := x
         if not na(sup)
             float sl = sup - stopAtr * atr - 0.25 * atr
-            f_plan(longs, 1, "GEX + order flow", sup, sl, f_nextLevel(gxLv, 1, sup, sup - sl), "limit", f_edge(sGX.totR, sGX.n), f_rec(sGX), "Buy absorption or a delta reversal at the GEX level " + f_px(sup) + (gxRegime == "" ? "" : ". Now " + gxRegime), false)
+            f_plan(longs, 1, "GEX + order flow", sup, sl, f_nextLevel(gxDLv, 1, sup, sup - sl), "limit", f_edge(sGX.totR, sGX.n), f_rec(sGX), "Buy absorption or a delta reversal at the GEX level " + f_px(sup) + (gxRegime == "" ? "" : ". Now " + gxRegime), false)
     bool gxLiveS = f_livePlan(shorts, sGX, -1)
-    if not gxLiveS and useGX and gexOn
+    if not gxLiveS and useGX and gexShowOn
         float res = na
-        for x in gxLv
+        for x in gxDLv
             if x > close and (na(res) or x < res)
                 res := x
         if not na(res)
             float sl = res + stopAtr * atr + 0.25 * atr
-            f_plan(shorts, -1, "GEX + order flow", res, sl, f_nextLevel(gxLv, -1, res, sl - res), "limit", f_edge(sGX.totR, sGX.n), f_rec(sGX), "Sell absorption or a delta reversal at the GEX level " + f_px(res) + (gxRegime == "" ? "" : ". Now " + gxRegime), false)
+            f_plan(shorts, -1, "GEX + order flow", res, sl, f_nextLevel(gxDLv, -1, res, sl - res), "limit", f_edge(sGX.totR, sGX.n), f_rec(sGX), "Sell absorption or a delta reversal at the GEX level " + f_px(res) + (gxRegime == "" ? "" : ". Now " + gxRegime), false)
 
     Plan bestL = f_pick(longs)
     Plan bestS = f_pick(shorts)

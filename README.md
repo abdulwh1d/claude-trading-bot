@@ -260,8 +260,9 @@ much of the hedging sits there (QQQ's open interest dwarfs NDX's), and strikes a
 and [gex-explained](https://github.com/FlashAlpha-lab/gex-explained) do: GEX per contract = gamma ×
 open interest × 100 × spot² × 1%, calls positive and puts negative, expiries up to 60 days out. The
 gamma flip is where total GEX changes sign as spot moves (a Black-Scholes sweep from −10% to +10%).
-The call wall is the strike with the most positive GEX within 5% of spot, the put wall the most
-negative, and the spikes are the eight biggest strikes within 3%: the range a day trades in.
+The call wall is the strike with the most positive GEX within 5% of spot and the put wall the
+most negative. The ladder is every strike within 2% of spot (the range a day trades in) holding
+at least 1% of the biggest one's GEX: about 60 levels for SPX, 30+ for NDX and 15 for GLD.
 
 A GitHub Action (`.github/workflows/gex-levels.yml`) runs it before the open (12:45 UTC) and
 every 30 minutes through the session, and commits `gex/latest.txt` and `gex/history.txt`. To
@@ -274,16 +275,20 @@ plenty):
 
 The levels are in the index's or ETF's own prices. The indicator moves them onto the futures with
 the futures-to-index ratio from regular-hours bars, so futures' premium over the index is taken
-care of. On the chart: the call wall is a thick green line, the put wall thick red, the flip
-dashed orange, and the spikes dotted, thicker for more gamma. Every label shows the price and the
-GEX in $ billions per 1% move, on a dark background so it reads over candles; spikes too close
-to another level are skipped. Lines start at the day's first snapshot. The GEX row says whether
+care of. On the chart: every strike within 1.5% of price ("Ladder range" in the settings, up
+to 2%) is a line, green for positive GEX and red for negative, bolder and thicker the more gamma
+it holds (scaled to the 85th percentile in range, so one huge wall doesn't wash the rest out).
+The call wall is a thick green line, the put wall thick red, the flip dashed orange. The 12
+biggest strikes ("GEX levels to label") get a label with the price and GEX in $ billions per 1%
+move; labels too close to another are skipped. Lines start at the day's first snapshot, and the
+chart always shows the newest snapshot, even one taken over the weekend or before the open. The GEX row says whether
 price is above the flip (positive gamma: dealers damp moves, walls tend to hold) or below it
 (negative gamma: dealers amplify moves) and gives the next level above and below price; hover it
 for the walls. Levels more than 36 hours old are flagged.
 
-history.txt keeps every run from the latest day and the first run of each earlier day (under
-Pine's 40,960-character limit), so the
+history.txt keeps every run from the latest day and the first run of each earlier day, with the
+full ladder only on each underlying's newest run (older runs keep their 8 biggest strikes, which
+is all the signals use), so it stays under Pine's 40,960-character limit, so the
 GEX + order flow record covers every day since the Action started. There's no free source of past
 GEX, so that record only builds forward from Oct 21 2026: give it a few weeks before trusting it.
 GEX rests on assumptions about who is long and short the options (dealers long calls and short
