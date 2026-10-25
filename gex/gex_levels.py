@@ -1,7 +1,7 @@
 """GEX levels for the TradingView dashboard.
 
 Pulls CBOE's free delayed option chains and computes dealer gamma exposure (GEX) by
-strike, the gamma flip, the call wall, the put wall and the biggest GEX spikes for:
+strike, the gamma flip, the call wall, the put wall and a ladder of every strike near spot for:
 
     ES / MES  ->  SPX (primary), SPY
     NQ / MNQ  ->  NDX (primary), QQQ
@@ -22,8 +22,8 @@ SPX and NDX lines combine the index chain with its ETF (SPY, QQQ): ETF strikes a
 moved onto the index scale (strike x index/ETF price) and their open interest scaled
 so each contract keeps its dollar gamma. Strikes are grouped into buckets (5 points
 for SPX, 25 for NDX) so the walls show where gamma piles up, not one odd strike.
-Walls are searched within 5% of spot and spikes within 3%, the range that matters
-for a day's trading.
+Walls are searched within 5% of spot. The ladder lists every strike bucket within 2%
+of spot (the range a day trades in) holding at least 1% of the biggest one's GEX.
 
 Output, one line per underlying, in the underlying's own prices (the indicator
 converts them to futures prices with the live futures/index ratio):
@@ -65,8 +65,9 @@ OCC = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
 
 MAX_DAYS = 60        # expirations included
 WALL_BAND = 0.05     # walls searched within +-5% of spot
-SPIKE_BAND = 0.03    # spikes searched within +-3% of spot
-N_SPIKES = 8
+LADDER_BAND = 0.02   # every strike bucket within +-2% of spot goes in the ladder
+MIN_SHARE = 0.01     # ...unless its GEX is under 1% of the biggest one there (noise)
+TOP_LEVELS = 8       # older snapshots in history keep only their 8 biggest strikes
 KEEP_DAYS = 40
 MAX_HISTORY_CHARS = 38_000   # Pine strings stop at 40,960 characters
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -175,15 +176,16 @@ def levels(spot: float, rows: list[dict], bucket: float = 0.0) -> dict:
         raise ValueError("no strikes near spot")
     cw = max(near, key=lambda k: near[k])
     pw = min(near, key=lambda k: near[k])
-    spikes = sorted(((k, g) for k, g in profile.items() if abs(k / spot - 1) <= SPIKE_BAND),
-                    key=lambda kg: abs(kg[1]), reverse=True)[:N_SPIKES]
+    ladder = [(k, g) for k, g in sorted(profile.items()) if abs(k / spot - 1) <= LADDER_BAND]
+    biggest = max((abs(g) for _, g in ladder), default=0.0)
+    ladder = [(k, g) for k, g in ladder if biggest > 0 and abs(g) >= MIN_SHARE * biggest]
     return {
         "spot": spot,
         "flip": gamma_flip(spot, rows, profile),
         "cw": cw if near[cw] > 0 else None,
         "pw": pw if near[pw] < 0 else None,
         "total": sum(profile.values()) / 1e9,
-        "spikes": [(k, g / 1e9) for k, g in sorted(spikes)],
+        "ladder": [(k, g / 1e9) for k, g in ladder],
     }
 
 
@@ -203,12 +205,24 @@ def fmt_gex(x: float, sig: int = 3) -> str:
 
 
 def line(stamp: str, name: str, lv: dict, src: str = "") -> str:
-    ks = ",".join(f"{fmt_num(k)}:{fmt_gex(g)}" for k, g in lv["spikes"])
+    ks = ",".join(f"{fmt_num(k)}:{fmt_gex(g)}" for k, g in lv["ladder"])
     return (f"{stamp} {name} spot={lv['spot']:.2f} flip={fmt_num(lv['flip'])} cw={fmt_num(lv['cw'])} "
             f"pw={fmt_num(lv['pw'])} total={fmt_gex(lv['total'])} k={ks}" + (f" src={src}" if src else ""))
 
 
 # -------------------------------------------------------------------- files --
+def compact(ln: str, n: int = TOP_LEVELS) -> str:
+    """The same snapshot with only its n biggest strikes, for older runs in history."""
+    out = []
+    for p in ln.split(" "):
+        if p.startswith("k="):
+            pairs = [kv.split(":") for kv in p[2:].split(",") if ":" in kv]
+            top = sorted(pairs, key=lambda kv: abs(float(kv[1])), reverse=True)[:n]
+            p = "k=" + ",".join(f"{k}:{g}" for k, g in sorted(top, key=lambda kv: float(kv[0])))
+        out.append(p)
+    return " ".join(out)
+
+
 def merge_history(path: str, new_lines: list[str]) -> None:
     old = []
     if os.path.exists(path):
@@ -229,6 +243,13 @@ def merge_history(path: str, new_lines: list[str]) -> None:
     kept = sorted((ln for (stamp, und), ln in keyed.items()
                    if stamp[:10] in days and (stamp[:10] == latest or first_of_day[(stamp[:10], und)] == stamp)),
                   key=lambda s: (s.split(" ")[0], s.split(" ")[1]))
+    # Only each underlying's newest run keeps its full ladder; older runs keep their
+    # biggest strikes, which is all the signals use.
+    newest: dict[str, str] = {}
+    for ln in kept:
+        stamp, und = ln.split(" ")[:2]
+        newest[und] = max(newest.get(und, ""), stamp)
+    kept = [ln if ln.split(" ")[0] == newest[ln.split(" ")[1]] else compact(ln) for ln in kept]
     # Drop the oldest runs until the file fits in one Pine string.
     while kept and len("\n".join(kept)) + 1 > MAX_HISTORY_CHARS:
         oldest = kept[0].split(" ")[0]

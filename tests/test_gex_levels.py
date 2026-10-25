@@ -69,8 +69,8 @@ def test_walls_and_flip_land_where_the_open_interest_is():
     lv = gex.levels(s, rows)
     assert lv["cw"] == 5900 and lv["pw"] == 5700
     assert 5700 < lv["flip"] < 5900                                     # balanced book: flip between the walls
-    assert len(lv["spikes"]) == gex.N_SPIKES
-    assert {5700, 5900} <= {k for k, _ in lv["spikes"]}
+    assert {5700, 5900} <= {k for k, _ in lv["ladder"]}
+    assert [k for k, _ in lv["ladder"]] == sorted(k for k, _ in lv["ladder"])
 
 
 def test_put_heavy_book_puts_the_flip_above_spot():
@@ -125,9 +125,10 @@ def test_gex_numbers_never_use_exponents():
         assert "e" not in s.lower() and float(s) == pytest.approx(x, rel=0.01, abs=1e-9)
 
 
-def test_history_fits_in_one_pine_string(tmp_path):
+def test_history_fits_in_one_pine_string(tmp_path, monkeypatch):
+    monkeypatch.setattr(gex, "MAX_HISTORY_CHARS", 12_000)                # small cap so it binds
     path = tmp_path / "history.txt"
-    pad = "k=" + ",".join(f"{7000 + 25 * i}:+1.23" for i in range(15))   # long lines: the cap binds
+    pad = "k=" + ",".join(f"{7000 + 25 * i}:+1.23" for i in range(15))
     lines = [f"2026-{m:02d}-{d:02d}T08:45 {u} spot=1 flip=1 cw=1 pw=1 total=+1 {pad}"
              for m in (8, 9) for d in range(1, 29) for u in gex.UNDERLYINGS]
     gex.merge_history(str(path), lines)
@@ -135,7 +136,7 @@ def test_history_fits_in_one_pine_string(tmp_path):
     assert len(text) <= gex.MAX_HISTORY_CHARS
     kept = text.splitlines()
     stamps = sorted({ln.split(" ")[0] for ln in kept})
-    assert 20 < len(stamps) < gex.KEEP_DAYS                               # trimmed by size, not count
+    assert 10 < len(stamps) < gex.KEEP_DAYS                               # trimmed by size, not count
     assert kept[-1].startswith("2026-09-28T08:45")                        # newest runs survive
     assert all(sum(ln.startswith(s) for ln in kept) == len(gex.UNDERLYINGS) for s in stamps)  # whole runs only
 
@@ -167,14 +168,18 @@ def test_etf_chain_adds_the_same_dollar_gamma_on_the_index_scale():
     assert gex.total_gex_at(spot, both) == pytest.approx(2 * gex.total_gex_at(spot, rows))
 
 
-def test_strikes_are_bucketed_and_spikes_stay_near_spot():
+def test_ladder_is_every_bucket_near_spot():
     spot = 5800.0
     strikes = [5500 + 5 * i for i in range(121)]                          # 5500 .. 6100 every 5
     payload = chain(spot, lambda k: 3000 if k < spot else 300, lambda k: 3000 if k > spot else 300, strikes)
     s, rows = gex.parse_chain(payload, NOW)
     lv = gex.levels(s, rows, bucket=25.0)
-    assert all(k % 25 == 0 for k, _ in lv["spikes"])
-    assert all(abs(k / s - 1) <= gex.SPIKE_BAND for k, _ in lv["spikes"])
+    ks = [k for k, _ in lv["ladder"]]
+    assert all(k % 25 == 0 for k in ks)
+    assert all(abs(k / s - 1) <= gex.LADDER_BAND for k in ks)
+    assert len(ks) >= 8                                                    # 5700 .. 5900 but the empty 5800
+    lv5 = gex.levels(s, rows, bucket=5.0)
+    assert len(lv5["ladder"]) > 3 * gex.TOP_LEVELS                         # SPX-size buckets: dozens of levels
     assert abs(lv["cw"] / s - 1) <= gex.WALL_BAND and abs(lv["pw"] / s - 1) <= gex.WALL_BAND
 
 
@@ -184,3 +189,16 @@ def test_history_keeps_todays_intraday_runs_and_one_run_per_earlier_day(tmp_path
     gex.merge_history(str(path), [f"{st} SPX spot=1 flip=1 cw=1 pw=1 total=+1 k=1:+1" for st in stamps])
     kept = [ln.split(" ")[0] for ln in path.read_text().splitlines()]
     assert kept == ["2026-10-21T08:45", "2026-10-22T08:45", "2026-10-22T09:45", "2026-10-22T10:15"]
+
+
+def test_only_the_newest_run_keeps_its_full_ladder(tmp_path):
+    path = tmp_path / "history.txt"
+    ladder = "k=" + ",".join(f"{7600 + 5 * i}:{'+' if i % 2 else '-'}{i + 1}" for i in range(30))
+    lines = [f"{st} SPX spot=7650 flip=7700 cw=7800 pw=7600 total=-5 {ladder}"
+             for st in ("2026-10-22T09:15", "2026-10-23T09:15", "2026-10-23T09:45")]
+    gex.merge_history(str(path), lines)
+    kept = path.read_text().splitlines()
+    n_levels = [len(ln.split("k=")[1].split(" ")[0].split(",")) for ln in kept]
+    assert n_levels == [gex.TOP_LEVELS, gex.TOP_LEVELS, 30]
+    biggest = sorted(kept[1].split("k=")[1].split(","), key=lambda kv: float(kv.split(":")[0]))
+    assert [kv.split(":")[0] for kv in biggest] == [str(7600 + 5 * i) for i in range(22, 30)]   # 8 largest |GEX|
