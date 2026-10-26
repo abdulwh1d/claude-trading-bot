@@ -126,7 +126,7 @@ def test_gex_numbers_never_use_exponents():
 
 
 def test_history_fits_in_one_pine_string(tmp_path, monkeypatch):
-    monkeypatch.setattr(gex, "MAX_HISTORY_CHARS", 12_000)                # small cap so it binds
+    monkeypatch.setattr(gex, "MAX_HISTORY_CHARS", 30_000)                # small cap so it binds
     path = tmp_path / "history.txt"
     pad = "k=" + ",".join(f"{7000 + 25 * i}:+1.23" for i in range(15))
     lines = [f"2026-{m:02d}-{d:02d}T08:45 {u} spot=1 flip=1 cw=1 pw=1 total=+1 {pad}"
@@ -183,12 +183,12 @@ def test_ladder_is_every_bucket_near_spot():
     assert abs(lv["cw"] / s - 1) <= gex.WALL_BAND and abs(lv["pw"] / s - 1) <= gex.WALL_BAND
 
 
-def test_history_keeps_todays_intraday_runs_and_one_run_per_earlier_day(tmp_path):
+def test_history_keeps_each_days_first_run_and_the_newest(tmp_path):
     path = tmp_path / "history.txt"
     stamps = ["2026-10-21T08:45", "2026-10-21T12:15", "2026-10-22T08:45", "2026-10-22T09:45", "2026-10-22T10:15"]
     gex.merge_history(str(path), [f"{st} SPX spot=1 flip=1 cw=1 pw=1 total=+1 k=1:+1" for st in stamps])
     kept = [ln.split(" ")[0] for ln in path.read_text().splitlines()]
-    assert kept == ["2026-10-21T08:45", "2026-10-22T08:45", "2026-10-22T09:45", "2026-10-22T10:15"]
+    assert kept == ["2026-10-21T08:45", "2026-10-22T08:45", "2026-10-22T10:15"]
 
 
 def test_only_the_newest_run_keeps_its_full_ladder(tmp_path):

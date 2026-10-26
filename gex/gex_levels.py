@@ -3,9 +3,11 @@
 Pulls CBOE's free delayed option chains and computes dealer gamma exposure (GEX) by
 strike, the gamma flip, the call wall, the put wall and a ladder of every strike near spot for:
 
-    ES / MES  ->  SPX (primary), SPY
-    NQ / MNQ  ->  NDX (primary), QQQ
-    GC / MGC  ->  GLD
+    ES / MES   ->  SPX (with SPY)        RTY / M2K  ->  RUT (with IWM)
+    NQ / MNQ   ->  NDX (with QQQ)        YM / MYM   ->  DIA (with DJX)
+    GC / MGC   ->  GLD                   SI / SIL   ->  SLV
+    CL / MCL   ->  USO                   NG         ->  UNG
+    ZB / UB    ->  TLT
 
 Method (as in CodeCraftIA/Options-Gamma-Exposure-Analysis-Tool and
 FlashAlpha-lab/gex-explained, the SpotGamma convention):
@@ -33,10 +35,10 @@ converts them to futures prices with the live futures/index ratio):
 GEX values are $ billions per 1% move, to 3 significant figures, never in exponent
 form (Pine's str.tonumber can't read 1e-05). Files written:
 
-    gex/latest.txt     this run's lines, for all five underlyings
+    gex/latest.txt     this run's lines, for every underlying
     gex/history.txt    snapshots, oldest first: paste this into the indicator. It keeps
-                       every run from the latest day and the first run of each earlier
-                       day, and stays under 38,000 characters (Pine strings stop at 40,960).
+                       the first run of each day plus the newest run, and stays under
+                       38,000 characters (Pine strings stop at 40,960).
 
 Usage:  python gex/gex_levels.py            (fetch from CBOE)
         python gex/gex_levels.py --file chain_dir/  (offline: read SPX.json etc.)
@@ -58,9 +60,21 @@ from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
 URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{}.json"
-UNDERLYINGS = {"SPX": "_SPX", "SPY": "SPY", "NDX": "_NDX", "QQQ": "QQQ", "GLD": "GLD"}
-COMBINE = {"SPX": "SPY", "NDX": "QQQ"}          # index line also counts its ETF's options
-BUCKET = {"SPX": 5.0, "NDX": 25.0, "SPY": 1.0, "QQQ": 1.0, "GLD": 1.0}
+UNDERLYINGS = {
+    "SPX": "_SPX", "SPY": "SPY",      # ES / MES
+    "NDX": "_NDX", "QQQ": "QQQ",      # NQ / MNQ
+    "RUT": "_RUT", "IWM": "IWM",      # RTY / M2K
+    "DIA": "DIA", "DJX": "_DJX",      # YM / MYM
+    "GLD": "GLD",                     # GC / MGC
+    "SLV": "SLV",                     # SI / SIL
+    "USO": "USO",                     # CL / MCL
+    "UNG": "UNG",                     # NG
+    "TLT": "TLT",                     # ZB / UB
+}
+# The first line also counts the second's options, moved onto its scale.
+COMBINE = {"SPX": "SPY", "NDX": "QQQ", "RUT": "IWM", "DIA": "DJX"}
+BUCKET = {"SPX": 5.0, "NDX": 25.0, "RUT": 5.0, "SPY": 1.0, "QQQ": 1.0, "IWM": 1.0, "DIA": 1.0,
+          "DJX": 1.0, "GLD": 1.0, "SLV": 0.5, "USO": 1.0, "UNG": 0.5, "TLT": 1.0}
 OCC = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
 
 MAX_DAYS = 60        # expirations included
@@ -233,15 +247,16 @@ def merge_history(path: str, new_lines: list[str]) -> None:
         parts = ln.split(" ")
         if len(parts) >= 2:
             keyed[(parts[0], parts[1])] = ln
-    # Every run from the latest day; the first run of each earlier day (it applies all
-    # that day), for the last KEEP_DAYS days.
-    latest = max((stamp[:10] for stamp, _ in keyed), default="")
+    # The first run of each day (it applies all that day) for the last KEEP_DAYS days,
+    # plus each underlying's newest run.
     first_of_day: dict[tuple[str, str], str] = {}
+    newest_run: dict[str, str] = {}
     for stamp, und in sorted(keyed):
         first_of_day.setdefault((stamp[:10], und), stamp)
+        newest_run[und] = stamp
     days = sorted({stamp[:10] for stamp, _ in keyed})[-KEEP_DAYS:]
     kept = sorted((ln for (stamp, und), ln in keyed.items()
-                   if stamp[:10] in days and (stamp[:10] == latest or first_of_day[(stamp[:10], und)] == stamp)),
+                   if stamp[:10] in days and (first_of_day[(stamp[:10], und)] == stamp or newest_run[und] == stamp)),
                   key=lambda s: (s.split(" ")[0], s.split(" ")[1]))
     # Only each underlying's newest run keeps its full ladder; older runs keep their
     # biggest strikes, which is all the signals use.
