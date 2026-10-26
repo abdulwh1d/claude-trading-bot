@@ -1308,6 +1308,44 @@ bool   gxLong   = not na(gxSup) and (absBull or dRevBull)
 bool   gxShort  = not na(gxRes) and (absBear or dRevBear)
 string gxRegime = na(gxFlip) ? "" : close > gxFlip ? "positive gamma, above the flip" : "negative gamma, below the flip"
 
+// Each strong strike (the walls and the 8 biggest) gets a status for the day: held when
+// a candle tests it and closes back on its side with absorption or a delta flip, broke
+// when a candle closes through it with delta behind the move. Touches are counted so
+// retests show. The first outcome per level per day feeds the held / tested record.
+var map<int, int> lvStat  = map.new<int, int>()
+var map<int, int> lvTouch = map.new<int, int>()
+var int lvHeldN  = 0
+var int lvBrokeN = 0
+var int lvDay    = na
+int nyDay = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
+if nyDay != lvDay
+    lvDay := nyDay
+    map.clear(lvStat)
+    map.clear(lvTouch)
+if barstate.isconfirmed and gexOn
+    array<float> strong = array.copy(gxTopK)
+    if not na(gx.cw)
+        array.push(strong, gx.cw)
+    if not na(gx.pw)
+        array.push(strong, gx.pw)
+    for k in strong
+        float y   = k * gexRatio
+        int   key = int(math.round(k * 100))
+        if low <= y + gxTol and high >= y - gxTol
+            if not (low[1] <= y + gxTol and high[1] >= y - gxTol)
+                map.put(lvTouch, key, nz(map.get(lvTouch, key)) + 1)
+            bool fromAbove = close[1] > y
+            int  st    = nz(map.get(lvStat, key))
+            bool held  = fromAbove ? close > y and (absBull or dRevBull) : close < y and (absBear or dRevBear)
+            bool broke = fromAbove ? close < y - gxTol and sellersDom : close > y + gxTol and buyersDom
+            if broke and st != -1
+                map.put(lvStat, key, -1)
+                if st == 0
+                    lvBrokeN += 1
+            else if held and st == 0
+                map.put(lvStat, key, 1)
+                lvHeldN += 1
+
 f_nextLevel(array<float> lvls, int dir, float entry, float risk) =>
     float best = na
     for x in lvls
@@ -1429,12 +1467,12 @@ if barstate.isconfirmed
 alertcondition(anyStratEntry, "Strategy entry (any)", "ICT Dash: a strategy entry fired on {{ticker}} {{interval}}")
 
 // GEX on the chart: a ladder of every strike within the chosen range of price, green
-// for positive GEX and red for negative, bolder and thicker for more gamma; the walls
-// and the flip on top. Every level is tagged L or S. Walls and green strikes are faded,
-// since dealers damp moves there: buy a hold below price, sell a rejection above. Red
-// strikes and the flip are traded on the break, since dealers push moves through them:
-// sell a break below price, buy a break above. The biggest strikes also show their
-// price and GEX in $ billions per 1% move; hover any tag for the reason.
+// for positive GEX and red for negative, bolder and thicker for more gamma. Only the
+// strong levels get a tag: the walls and the 3 biggest strikes are grade A, the next
+// 5 grade B. Every tagged level is a bounce level: L below price (support), S above
+// (resistance). Its status shows whether it is legit today: ✓ held (a test closed back
+// with absorption or a delta flip), ✗ broke (closed through with delta behind it, don't
+// fade it), or retest (touched before, weaker). Hover a tag for the details.
 var array<line>  gxLines  = array.new<line>()
 var array<label> gxLabels = array.new<label>()
 f_glabel(float y, color c, string txt, string sz, string tip) =>
@@ -1445,12 +1483,18 @@ f_gexAt(GexSnap s, float k) =>
         if kk == k
             out := array.get(s.gs, i)
     out
-// L or S at a level, its color and why: fade = buy below price / sell above, else the break.
-f_ls(float y, bool fade) =>
-    bool below = y < close
-    bool isL = fade ? below : not below
-    string why = fade ? (below ? "Support: dealers buy dips here, so price tends to bounce. Buy a hold (absorption or delta flipping up)." : "Resistance: dealers sell rallies here, so price tends to stall. Sell a rejection (absorption or delta flipping down).") : (below ? "Dealers sell into drops here, so a break down tends to keep going. Sell the break." : "Dealers buy into rallies here, so a break up tends to keep going. Buy the break.")
-    [isL ? "L" : "S", isL ? cBull : cBear, why]
+// Tag text, color and tooltip for a strong level.
+f_tag(float k, float y, string grade, string name, float gv) =>
+    int    key  = int(math.round(k * 100))
+    int    st   = nz(map.get(lvStat, key))
+    int    tch  = nz(map.get(lvTouch, key))
+    bool   isL  = y < close
+    string dir  = isL ? "L" : "S"
+    string stat = st == 1 ? "  ✓ held" : st == -1 ? "  ✗ broke" : tch >= 2 ? "  · retest" : ""
+    color  c    = st == -1 ? cNeu : color.new(isL ? cBull : cBear, st == 0 and tch >= 2 ? 45 : 0)
+    string txt  = grade + " " + dir + "  " + name + f_px(y) + (na(gv) ? "" : " · " + f_signed(gv, "#.##") + "B") + stat
+    string tip  = "Grade " + grade + (grade == "A" ? " (a wall or one of the 3 biggest strikes)" : " (one of the next 5 biggest strikes)") + ". " + (isL ? "Support below price: look for a bounce long." : "Resistance above price: look for a bounce short.") + " Wait for a candle to close at the level with absorption or delta flipping " + (isL ? "up" : "down") + ", then enter on the pullback, not the spike. " + (st == 1 ? "Today: it held." : st == -1 ? "Today: it broke with delta behind it, so don't fade it." : tch >= 2 ? "Tested " + str.tostring(tch) + " times today, so it's weaker." : tch == 1 ? "Tested once today, no clear result yet." : "Not tested yet today.")
+    [txt, c, tip]
 if barstate.islast
     for ln in gxLines
         line.delete(ln)
@@ -1480,57 +1524,41 @@ if barstate.islast
                     int   tr = int(math.round(60 - 60 * math.sqrt(sh)))
                     array.push(gxLines, line.new(x1, y, bar_index + 3, y, color = color.new(gv >= 0 ? cBull : cBear, tr), width = 1 + int(math.round(3 * sh)), style = sh >= 0.15 ? line.style_solid : line.style_dotted))
         array<float> placed = array.new<float>()
-        array<float> tagged = array.new<float>()
         if not na(gxDC) and math.abs(gxDC - close) <= far
-            float gc = f_gexAt(gxD, gxD.cw)
-            [ls1, lc1, why1] = f_ls(gxDC, true)
+            [tg1, cg1, pg1] = f_tag(gxD.cw, gxDC, "A", "Call wall ", f_gexAt(gxD, gxD.cw))
             array.push(gxLines, line.new(x1, gxDC, bar_index + 3, gxDC, color = cBull, width = 3))
-            array.push(gxLabels, f_glabel(gxDC, lc1, ls1 + "  Call wall " + f_px(gxDC) + (na(gc) ? "" : " · " + f_signed(gc, "#.##") + "B"), size.small, "Call wall, the biggest positive GEX strike. " + why1))
+            array.push(gxLabels, f_glabel(gxDC, cg1, tg1, size.small, pg1))
             array.push(placed, gxDC)
-            array.push(tagged, gxDC)
         if not na(gxDP) and math.abs(gxDP - close) <= far
-            float gp = f_gexAt(gxD, gxD.pw)
-            [ls2, lc2, why2] = f_ls(gxDP, true)
+            [tg2, cg2, pg2] = f_tag(gxD.pw, gxDP, "A", "Put wall ", f_gexAt(gxD, gxD.pw))
             array.push(gxLines, line.new(x1, gxDP, bar_index + 3, gxDP, color = cBear, width = 3))
-            array.push(gxLabels, f_glabel(gxDP, lc2, ls2 + "  Put wall " + f_px(gxDP) + (na(gp) ? "" : " · " + f_signed(gp, "#.##") + "B"), size.small, "Put wall, the biggest negative GEX strike. It usually holds the first test; if it breaks, selling can speed up. " + why2))
+            array.push(gxLabels, f_glabel(gxDP, cg2, tg2, size.small, pg2))
             array.push(placed, gxDP)
-            array.push(tagged, gxDP)
         if not na(gxDF) and math.abs(gxDF - close) <= far
-            [ls3, lc3, why3] = f_ls(gxDF, false)
             array.push(gxLines, line.new(x1, gxDF, bar_index + 3, gxDF, color = cWarn, width = 2, style = line.style_dashed))
-            array.push(gxLabels, f_glabel(gxDF, lc3, ls3 + "  γ flip " + f_px(gxDF) + (close > gxDF ? " · price above (+γ)" : " · price below (−γ)"), size.small, "Gamma flip. " + (gxDF > close ? "Reclaiming it moves the market into calmer positive gamma: buy the reclaim." : "Losing it moves the market into faster negative gamma: sell the loss.")))
+            array.push(gxLabels, f_glabel(gxDF, cWarn, "γ flip " + f_px(gxDF) + (close > gxDF ? " · price above (+γ, calmer)" : " · price below (−γ, faster)"), size.small, "Gamma flip: above it moves tend to be calm and levels hold more; below it moves are faster and levels break more often."))
             array.push(placed, gxDF)
-        // Price and GEX on the biggest strikes, then a plain L or S on every other one.
+        // The 8 biggest strikes: 3 grade A, 5 grade B.
         array<float> absg = array.new<float>()
         for g in gxD.gs
             array.push(absg, math.abs(g))
         array<int> ord = array.sort_indices(absg, order.descending)
-        int shown = 0
+        int rank = 0
         for ix in ord
-            float y = array.get(gxD.ks, ix) * gexRatio
-            if shown < gexSpikes and y >= lo and y <= hi
-                bool crowded = false
-                for d in placed
-                    if math.abs(d - y) <= 0.5 * atr
-                        crowded := true
-                if not crowded
-                    float gv = array.get(gxD.gs, ix)
-                    [ls4, lc4, why4] = f_ls(y, gv >= 0)
-                    array.push(gxLabels, f_glabel(y, lc4, ls4 + "  " + f_px(y) + " · " + f_signed(gv, "#.##") + "B", size.tiny, (gv >= 0 ? "Positive GEX. " : "Negative GEX. ") + why4))
-                    array.push(placed, y)
-                    array.push(tagged, y)
-                    shown += 1
-        for [i, kk] in gxD.ks
-            float y = kk * gexRatio
-            if y >= lo and y <= hi
-                bool done = false
-                for d in tagged
-                    if math.abs(d - y) < syminfo.mintick / 2
-                        done := true
-                if not done
-                    float gv = array.get(gxD.gs, i)
-                    [ls5, lc5, why5] = f_ls(y, gv >= 0)
-                    array.push(gxLabels, f_glabel(y, lc5, ls5, size.tiny, f_px(y) + " · " + f_signed(gv, "#.##") + "B. " + why5))
+            if rank < 8
+                float kx = array.get(gxD.ks, ix)
+                if kx != gxD.cw and kx != gxD.pw
+                    rank += 1
+                    float y = kx * gexRatio
+                    if y >= lo and y <= hi
+                        bool crowded = false
+                        for d in placed
+                            if math.abs(d - y) <= 0.5 * atr
+                                crowded := true
+                        if not crowded
+                            [tg3, cg3, pg3] = f_tag(kx, y, rank <= 3 ? "A" : "B", "", array.get(gxD.gs, ix))
+                            array.push(gxLabels, f_glabel(y, cg3, tg3, rank <= 3 ? size.small : size.tiny, pg3))
+                            array.push(placed, y)
 
 // -------------------------------------------------------------- drawings --
 var line fibLine = na
@@ -1650,7 +1678,7 @@ if barstate.islast
             gxUp := lv
         if lv < close and (na(gxDn) or lv > gxDn)
             gxDn := lv
-    string gxTxt = gexName == "" ? "No options mapping for this symbol" : array.size(gexSnaps) == 0 ? "Paste gex/history.txt into the settings" : not gexShowOn ? "Waiting for a regular-hours bar to line up prices" : (na(gxDF) ? "No flip" : (close > gxDF ? "+γ above flip " : "−γ below flip ") + f_px(gxDF)) + " · next ↑ " + f_px(gxUp) + " ↓ " + f_px(gxDn) + (not na(gxSup) or not na(gxRes) ? " · at a level" : "")
+    string gxTxt = gexName == "" ? "No options mapping for this symbol" : array.size(gexSnaps) == 0 ? "Paste gex/history.txt into the settings" : not gexShowOn ? "Waiting for a regular-hours bar to line up prices" : (na(gxDF) ? "No flip" : (close > gxDF ? "+γ above flip " : "−γ below flip ") + f_px(gxDF)) + " · next ↑ " + f_px(gxUp) + " ↓ " + f_px(gxDn) + (not na(gxSup) or not na(gxRes) ? " · at a level" : "") + (lvHeldN + lvBrokeN > 0 ? " · held " + str.tostring(lvHeldN) + "/" + str.tostring(lvHeldN + lvBrokeN) : "")
     string gxTip = ""
     if gexShowOn
         gxTip := gexName + " snapshot " + str.format_time(gxD.ts, "MMM d HH:mm", "America/New_York") + " ET." + (na(gxDF) ? "" : " Price is " + f_px(math.abs(close - gxDF)) + (close > gxDF ? " above" : " below") + " the flip.") + " Walls: put " + f_px(gxDP) + ", call " + f_px(gxDC) + ". Total GEX " + f_signed(gxD.total, "#.##") + "B per 1% move. Above the flip dealers damp moves (mean reversion, walls hold); below it they amplify them."

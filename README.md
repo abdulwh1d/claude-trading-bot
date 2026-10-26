@@ -278,18 +278,19 @@ the futures-to-index ratio from regular-hours bars, so futures' premium over the
 care of. On the chart: every strike within 1.5% of price ("Ladder range" in the settings, up
 to 2%) is a line, green for positive GEX and red for negative, bolder and thicker the more gamma
 it holds (scaled to the 85th percentile in range, so one huge wall doesn't wash the rest out).
-The call wall is a thick green line, the put wall thick red, the flip dashed orange. Every
-level carries an L (long) or S (short) tag; hover it for the reason:
+The call wall is a thick green line, the put wall thick red, the flip dashed orange. Only the
+strong levels are tagged: the walls and the 3 biggest strikes are grade A, the next 5 grade B;
+the rest stay as plain lines. Every tag is a bounce level, L below price (support) and S above
+(resistance), with a live status for the day:
 
-| Level | Below price | Above price | Why |
-|---|---|---|---|
-| Walls and green strikes (+GEX) | L: buy a hold | S: sell a rejection | Dealers damp moves there, so price tends to bounce or stall |
-| Red strikes (−GEX) | S: sell the break | L: buy the break | Dealers push moves through them, so breaks tend to keep going |
-| Gamma flip | S: sell the loss | L: buy the reclaim | It separates calm (above) from fast (below) markets |
+| Status | Meaning |
+|---|---|
+| ✓ held | A candle tested it and closed back on its side with absorption or a delta flip |
+| ✗ broke (grey) | A candle closed through it with delta behind the move: don't fade it |
+| · retest (dimmed) | Touched before today without a result, so it's weaker |
 
-Wait for order flow at the level (absorption or a delta reversal for a hold, delta driving through
-for a break) before acting on a tag. The 12 biggest strikes ("GEX levels to label") also show
-the price and GEX in $ billions per 1% move. Lines start at the day's first snapshot, and the
+The GEX row adds the record, "held X/Y": of the strong levels that gave a result, how many held.
+Wait for the candle at the level to close, then enter on the pullback, not the spike. Lines start at the day's first snapshot, and the
 chart always shows the newest snapshot, even one taken over the weekend or before the open. The GEX row says whether
 price is above the flip (positive gamma: dealers damp moves, walls tend to hold) or below it
 (negative gamma: dealers amplify moves) and gives the next level above and below price; hover it
