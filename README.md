@@ -251,7 +251,9 @@ orders. GEX + order flow proposes a limit entry at the nearest GEX level on each
 
 **GEX levels.** Gamma exposure (GEX) estimates where options dealers' hedging pushes price or pins
 it, and order flow shows whether buyers or sellers actually win at those levels. The levels come
-from CBOE's free, delayed option chains: SPX plus SPY for ES, NDX plus QQQ for NQ, GLD for gold.
+from CBOE's free, delayed option chains: SPX plus SPY for ES, NDX plus QQQ for NQ, RUT plus IWM
+for RTY, DIA plus DJX for YM, and the ETFs GLD (gold), SLV (silver), USO (crude), UNG (natural gas)
+and TLT (bonds). The ETF-only ones are rougher stand-ins: the futures' own options aren't free.
 The ETF's options are moved onto the index's scale with the same dollar gamma and added in, since
 much of the hedging sits there (QQQ's open interest dwarfs NDX's), and strikes are grouped into
 5-point (SPX) and 25-point (NDX) buckets.

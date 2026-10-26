@@ -134,7 +134,7 @@ ofAbsDelta = input.int(20, "Absorption delta (% of the bar's volume)", minval = 
 
 G_GX = "GEX levels"
 gexText   = input.text_area("", "GEX levels (paste gex/history.txt)", tooltip = "Copy gex/history.txt from your GitHub repo (updated every weekday morning) and paste it here. It holds every snapshot, so the GEX signal's record covers past days too. gex/latest.txt works as well (today only). Pine reads at most 40,960 characters; history.txt is kept under that.", group = G_GX, display = display.none)
-gexUnd    = input.string("Auto", "Options underlying", options = ["Auto", "SPX", "SPY", "NDX", "QQQ", "GLD"], tooltip = "Auto uses NDX for NQ, SPX for ES and GLD for gold.", group = G_GX, display = display.none)
+gexUnd    = input.string("Auto", "Options underlying", options = ["Auto", "SPX", "SPY", "NDX", "QQQ", "RUT", "IWM", "DIA", "GLD", "SLV", "USO", "UNG", "TLT"], tooltip = "Auto: NQ uses NDX, ES SPX, RTY RUT, YM DIA, gold GLD, silver SLV, crude USO, natural gas UNG, bonds TLT. The ETF-based ones (gold, silver, crude, gas, bonds) are rougher: the ETF's options stand in for the futures'.", group = G_GX, display = display.none)
 showGex   = input.bool(true, "Draw GEX levels", group = G_GX, display = display.none)
 gexSpikes = input.int(12, "GEX levels to label", minval = 0, maxval = 30, tooltip = "The biggest strikes in the ladder get a label with their price and GEX.", group = G_GX, display = display.none)
 gexTolAtr = input.float(0.3, "At a GEX level when within (x ATR)", minval = 0.05, step = 0.05, group = G_GX, display = display.none)
@@ -1158,9 +1158,10 @@ type GexSnap
 f_gnum(string s) =>
     s == "na" or s == "" ? na : str.tonumber(str.replace_all(s, "+", ""))
 
-string gexAuto   = syminfo.root == "NQ" or syminfo.root == "MNQ" ? "NDX" : syminfo.root == "ES" or syminfo.root == "MES" ? "SPX" : syminfo.root == "GC" or syminfo.root == "MGC" ? "GLD" : ""
+string gxRoot    = syminfo.root
+string gexAuto   = gxRoot == "NQ" or gxRoot == "MNQ" ? "NDX" : gxRoot == "ES" or gxRoot == "MES" ? "SPX" : gxRoot == "RTY" or gxRoot == "M2K" ? "RUT" : gxRoot == "YM" or gxRoot == "MYM" ? "DIA" : gxRoot == "GC" or gxRoot == "MGC" ? "GLD" : gxRoot == "SI" or gxRoot == "SIL" or gxRoot == "SIC" ? "SLV" : gxRoot == "CL" or gxRoot == "MCL" or gxRoot == "QM" ? "USO" : gxRoot == "NG" or gxRoot == "QG" or gxRoot == "MNG" ? "UNG" : gxRoot == "ZB" or gxRoot == "UB" ? "TLT" : ""
 string gexName   = gexUnd == "Auto" ? gexAuto : gexUnd
-string gexTicker = gexName == "SPX" ? "SP:SPX" : gexName == "SPY" ? "AMEX:SPY" : gexName == "NDX" ? "NASDAQ:NDX" : gexName == "QQQ" ? "NASDAQ:QQQ" : gexName == "GLD" ? "AMEX:GLD" : ""
+string gexTicker = gexName == "SPX" ? "SP:SPX" : gexName == "SPY" ? "AMEX:SPY" : gexName == "NDX" ? "NASDAQ:NDX" : gexName == "QQQ" ? "NASDAQ:QQQ" : gexName == "RUT" ? "TVC:RUT" : gexName == "IWM" ? "AMEX:IWM" : gexName == "DIA" ? "AMEX:DIA" : gexName == "GLD" ? "AMEX:GLD" : gexName == "SLV" ? "AMEX:SLV" : gexName == "USO" ? "AMEX:USO" : gexName == "UNG" ? "AMEX:UNG" : gexName == "TLT" ? "NASDAQ:TLT" : ""
 
 var array<GexSnap> gexSnaps = array.new<GexSnap>()
 if barstate.isfirst and gexName != ""
