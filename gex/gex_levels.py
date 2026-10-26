@@ -32,6 +32,9 @@ converts them to futures prices with the live futures/index ratio):
 
     2026-10-21T08:45 SPX spot=5801.20 flip=5750.50 cw=5900 pw=5700 total=+4.21 k=5800:+3.21,5900:+2.10 src=SPX+SPY
 
+Each line also carries v=strike:calls/puts for the 8 busiest strikes by today's options
+volume within 2% of spot (index-sized contracts): the options-flow levels.
+
 GEX values are $ billions per 1% move, to 3 significant figures, never in exponent
 form (Pine's str.tonumber can't read 1e-05). Files written:
 
@@ -82,6 +85,7 @@ WALL_BAND = 0.05     # walls searched within +-5% of spot
 LADDER_BAND = 0.02   # every strike bucket within +-2% of spot goes in the ladder
 MIN_SHARE = 0.01     # ...unless its GEX is under 1% of the biggest one there (noise)
 TOP_LEVELS = 8       # older snapshots in history keep only their 8 biggest strikes
+N_VOLUME = 8         # options-flow levels: the 8 busiest strikes by today's volume
 KEEP_DAYS = 40
 MAX_HISTORY_CHARS = 38_000   # Pine strings stop at 40,960 characters
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -99,7 +103,8 @@ def fetch(symbol: str) -> dict:
 
 
 def parse_chain(payload: dict, now: datetime) -> tuple[float, list[dict]]:
-    """Spot price and one row per contract: strike, type, years to expiry, gamma, OI, IV."""
+    """Spot price and one row per contract: strike, type, years to expiry, gamma, OI, IV and
+    today's volume. Contracts with no open interest are kept when they traded today."""
     data = payload.get("data", payload)
     spot = float(data["current_price"])
     rows = []
@@ -113,7 +118,8 @@ def parse_chain(payload: dict, now: datetime) -> tuple[float, list[dict]]:
         if days < -0.01 or days > MAX_DAYS:
             continue
         oi = float(o.get("open_interest") or 0)
-        if oi <= 0:
+        vol = float(o.get("volume") or 0)
+        if oi <= 0 and vol <= 0:
             continue
         rows.append({
             "strike": int(k) / 1000.0,
@@ -122,6 +128,7 @@ def parse_chain(payload: dict, now: datetime) -> tuple[float, list[dict]]:
             "gamma": float(o.get("gamma") or 0),
             "oi": oi,
             "iv": float(o.get("iv") or 0),
+            "vol": vol,
         })
     return spot, rows
 
@@ -140,9 +147,25 @@ def contract_gex(gamma: float, oi: float, spot: float, cp: str) -> float:
 
 
 def rescale(rows: list[dict], ratio: float) -> list[dict]:
-    """ETF contracts on the index's scale: strike x ratio, gamma / ratio, OI / ratio.
-    gamma x OI x spot^2 then gives the same dollar gamma as on the ETF's own scale."""
-    return [dict(r, strike=r["strike"] * ratio, gamma=r["gamma"] / ratio, oi=r["oi"] / ratio) for r in rows]
+    """ETF contracts on the index's scale: strike x ratio, gamma / ratio, OI and volume / ratio.
+    gamma x OI x spot^2 then gives the same dollar gamma as on the ETF's own scale, and
+    volume counts in index-sized contracts."""
+    return [dict(r, strike=r["strike"] * ratio, gamma=r["gamma"] / ratio, oi=r["oi"] / ratio,
+                 vol=r.get("vol", 0.0) / ratio) for r in rows]
+
+
+def volume_by_strike(spot: float, rows: list[dict], bucket: float = 0.0) -> list[tuple[float, float, float]]:
+    """Today's options volume at the busiest strikes within LADDER_BAND of spot: the
+    options-flow levels. (strike, call volume, put volume), biggest N_VOLUME, by strike."""
+    out: dict[float, list[float]] = {}
+    for r in rows:
+        if r.get("vol", 0) <= 0 or abs(r["strike"] / spot - 1) > LADDER_BAND:
+            continue
+        k = round(r["strike"] / bucket) * bucket if bucket > 0 else r["strike"]
+        cv = out.setdefault(k, [0.0, 0.0])
+        cv[0 if r["cp"] == "C" else 1] += r["vol"]
+    top = sorted(out.items(), key=lambda kv: kv[1][0] + kv[1][1], reverse=True)[:N_VOLUME]
+    return sorted((k, c, p) for k, (c, p) in top)
 
 
 def gex_by_strike(spot: float, rows: list[dict], bucket: float = 0.0) -> dict[float, float]:
@@ -200,6 +223,7 @@ def levels(spot: float, rows: list[dict], bucket: float = 0.0) -> dict:
         "pw": pw if near[pw] < 0 else None,
         "total": sum(profile.values()) / 1e9,
         "ladder": [(k, g / 1e9) for k, g in ladder],
+        "volume": volume_by_strike(spot, rows, bucket),
     }
 
 
@@ -220,15 +244,20 @@ def fmt_gex(x: float, sig: int = 3) -> str:
 
 def line(stamp: str, name: str, lv: dict, src: str = "") -> str:
     ks = ",".join(f"{fmt_num(k)}:{fmt_gex(g)}" for k, g in lv["ladder"])
+    vs = ",".join(f"{fmt_num(k)}:{round(c)}/{round(p)}" for k, c, p in lv.get("volume", []) if round(c) + round(p) > 0)
     return (f"{stamp} {name} spot={lv['spot']:.2f} flip={fmt_num(lv['flip'])} cw={fmt_num(lv['cw'])} "
-            f"pw={fmt_num(lv['pw'])} total={fmt_gex(lv['total'])} k={ks}" + (f" src={src}" if src else ""))
+            f"pw={fmt_num(lv['pw'])} total={fmt_gex(lv['total'])} k={ks}" + (f" v={vs}" if vs else "")
+            + (f" src={src}" if src else ""))
 
 
 # -------------------------------------------------------------------- files --
 def compact(ln: str, n: int = TOP_LEVELS) -> str:
-    """The same snapshot with only its n biggest strikes, for older runs in history."""
+    """The same snapshot with only its n biggest strikes and no volume levels, for older
+    runs in history."""
     out = []
     for p in ln.split(" "):
+        if p.startswith("v="):
+            continue
         if p.startswith("k="):
             pairs = [kv.split(":") for kv in p[2:].split(",") if ":" in kv]
             top = sorted(pairs, key=lambda kv: abs(float(kv[1])), reverse=True)[:n]

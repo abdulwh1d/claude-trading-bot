@@ -202,3 +202,27 @@ def test_only_the_newest_run_keeps_its_full_ladder(tmp_path):
     assert n_levels == [gex.TOP_LEVELS, gex.TOP_LEVELS, 30]
     biggest = sorted(kept[1].split("k=")[1].split(","), key=lambda kv: float(kv.split(":")[0]))
     assert [kv.split(":")[0] for kv in biggest] == [str(7600 + 5 * i) for i in range(22, 30)]   # 8 largest |GEX|
+
+
+def test_volume_levels_are_the_busiest_strikes_near_spot():
+    spot = 5800.0
+    strikes = [5600 + 25 * i for i in range(17)]
+    payload = chain(spot, lambda k: 1000, lambda k: 1000, strikes)
+    for o in payload["data"]["options"]:
+        k = int(o["option"][-8:]) / 1000
+        o["volume"] = 5000 if k == 5750 and o["option"][-9] == "P" else (3000 if k == 5850 else 10)
+    payload["data"]["options"].append({"option": occ("SPXW", datetime(2026, 10, 21), "C", 5825), "open_interest": 0,
+                                       "volume": 2500, "iv": 0.2, "gamma": 0.0})   # new 0DTE strike, no OI yet
+    s, rows = gex.parse_chain(payload, NOW)
+    lv = gex.levels(s, rows, bucket=25.0)
+    vol = {k: (c, p) for k, c, p in lv["volume"]}
+    assert len(vol) == gex.N_VOLUME and all(abs(k / s - 1) <= gex.LADDER_BAND for k in vol)
+    assert vol[5750] == (10, 5000) and vol[5850] == (3000, 3000) and vol[5825] == (2510, 10)   # plus the regular 5825 contracts
+    ln = gex.line("2026-10-21T10:15", "SPX", lv)
+    assert " v=5700:" in ln and "5750:10/5000" in ln
+    assert " v=" not in gex.compact(ln)                                # older runs drop the volume levels
+
+
+def test_etf_volume_counts_in_index_sized_contracts():
+    rows = [{"strike": 580.0, "cp": "P", "t": 0.01, "gamma": 0.1, "oi": 100.0, "iv": 0.2, "vol": 1000.0}]
+    assert gex.rescale(rows, 10.0)[0]["vol"] == pytest.approx(100.0)
