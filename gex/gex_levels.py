@@ -277,7 +277,7 @@ def merge_history(path: str, new_lines: list[str]) -> None:
         if len(parts) >= 2:
             keyed[(parts[0], parts[1])] = ln
     # The first run of each day (it applies all that day) for the last KEEP_DAYS days,
-    # plus each underlying's newest run.
+    # plus each underlying's newest run. Forecast lines (FC:) keep only the newest.
     first_of_day: dict[tuple[str, str], str] = {}
     newest_run: dict[str, str] = {}
     for stamp, und in sorted(keyed):
@@ -285,7 +285,8 @@ def merge_history(path: str, new_lines: list[str]) -> None:
         newest_run[und] = stamp
     days = sorted({stamp[:10] for stamp, _ in keyed})[-KEEP_DAYS:]
     kept = sorted((ln for (stamp, und), ln in keyed.items()
-                   if stamp[:10] in days and (first_of_day[(stamp[:10], und)] == stamp or newest_run[und] == stamp)),
+                   if stamp[:10] in days and newest_run[und] == stamp
+                   or stamp[:10] in days and first_of_day[(stamp[:10], und)] == stamp and not und.startswith("FC:")),
                   key=lambda s: (s.split(" ")[0], s.split(" ")[1]))
     # Only each underlying's newest run keeps its full ladder; older runs keep their
     # biggest strikes, which is all the signals use.

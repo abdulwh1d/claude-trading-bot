@@ -191,6 +191,16 @@ def test_history_keeps_each_days_first_run_and_the_newest(tmp_path):
     assert kept == ["2026-10-21T08:45", "2026-10-22T08:45", "2026-10-22T10:15"]
 
 
+def test_history_keeps_only_the_newest_forecast(tmp_path):
+    path = tmp_path / "history.txt"
+    stamps = ["2026-10-21T08:45", "2026-10-22T08:45", "2026-10-22T09:15"]
+    gex.merge_history(str(path), [f"{st} FC:NQ last=1 c1h=2 c2h=3 hi=3 lo=1 hit=0/0" for st in stamps]
+                      + [f"{st} SPX spot=1 flip=1 cw=1 pw=1 total=+1 k=1:+1" for st in stamps])
+    kept = [tuple(ln.split(" ")[:2]) for ln in path.read_text().splitlines()]
+    assert kept == [("2026-10-21T08:45", "SPX"), ("2026-10-22T08:45", "SPX"),
+                    ("2026-10-22T09:15", "FC:NQ"), ("2026-10-22T09:15", "SPX")]
+
+
 def test_only_the_newest_run_keeps_its_full_ladder(tmp_path):
     path = tmp_path / "history.txt"
     ladder = "k=" + ",".join(f"{7600 + 5 * i}:{'+' if i % 2 else '-'}{i + 1}" for i in range(30))

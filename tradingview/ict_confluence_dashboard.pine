@@ -8,11 +8,12 @@ indicator("ICT Confluence Dashboard", shorttitle = "ICT Dash", overlay = true, m
 // of volume and the CVD trend), a SuperFlow-style flow score, big prints,
 // relative volume and session timing, for 5-30 minute futures charts (NQ/MNQ,
 // ES/MES, GC/MGC). Signals print on candle close only, so they don't repaint.
-// Nine more playbooks run alongside: breakout, pullback, range, mean reversion,
-// news, spread, scalping, order flow and GEX + order flow, each with its own
-// signals, stop, target and record. A side table shows the best long and short
-// among them. GEX levels (dealer gamma, from gex/gex_levels.py) are drawn when
-// pasted into the settings.
+// Ten more playbooks run alongside: breakout, pullback, range, mean reversion,
+// news, spread, scalping, order flow, GEX + order flow and GEX + anchored VWAP,
+// each with its own signals, stop, target and record. A side table shows the best
+// long and short among them. GEX levels (dealer gamma, from gex/gex_levels.py),
+// today's busiest option strikes and Kronos forecasts are drawn when the levels
+// file is pasted into the settings.
 // An engineering tool, not financial advice. History stats ignore fees and
 // slippage.
 // ============================================================================
@@ -140,6 +141,17 @@ gexSpikes = input.int(12, "GEX levels to label", minval = 0, maxval = 30, toolti
 gexTolAtr = input.float(0.3, "At a GEX level when within (x ATR)", minval = 0.05, step = 0.05, group = G_GX, display = display.none)
 useGX     = input.bool(true, "GEX + order flow signals", group = G_GX, display = display.none)
 gexRange  = input.float(1.5, "Ladder range (% from price)", minval = 0.25, maxval = 2.0, step = 0.25, tooltip = "Every strike within this distance of price is drawn: green for positive GEX, red for negative, bolder for more. The levels file covers 2%.", group = G_GX, display = display.none)
+gexMode   = input.string("Trusted only", "GEX levels to show", options = ["Trusted only", "Strong levels", "Full ladder"], tooltip = "Trusted only: the call wall, the put wall and the gamma flip, plus a big-GEX strike only where today's option volume is heavy too (★ flow) and only until it breaks. The GEX signals use the same levels. Strong levels: the walls, the flip and the 8 biggest strikes. Full ladder: every strike in range. Gold, silver, crude, gas and bonds use an ETF's options, so Trusted only shows just their walls and flip.", group = G_GX, display = display.none)
+showOV    = input.bool(true, "Mark options-flow levels", tooltip = "Today's busiest option strikes near price, from the same CBOE chains: teal when calls dominate, pink when puts do. Works on every timeframe (TradingView's Options Volume Profile only draws on 1D and up).", group = G_GX, display = display.none)
+nOV       = input.int(4, "Options-flow levels to mark", minval = 1, maxval = 8, group = G_GX, display = display.none)
+showFC    = input.bool(true, "Kronos forecast row", tooltip = "Kronos, an open-source model trained on candlestick charts, forecasts the next 2 hours every 30 minutes in the GitHub Action (NQ, ES, RTY, YM, gold). The row shows the forecast and how often its 1-hour direction call was right lately. An experiment, not a signal.", group = G_GX, display = display.none)
+
+G_GA = "GEX + anchored VWAP"
+useGA     = input.bool(true, "GEX + AVWAP signals", tooltip = "GEX says where price may turn; a VWAP anchored at the start of the move into the level says whether that move is still in control. Reversal: price reacts at the level and closes back through the AVWAP. Continuation: price breaks the level while the AVWAP holds, then retests the level.", group = G_GA, display = display.none)
+gaShow    = input.bool(true, "Draw the anchored VWAP", group = G_GA, display = display.none)
+gaLook    = input.int(48, "Look back for the move's start (bars)", minval = 10, maxval = 300, group = G_GA, display = display.none)
+gaWait    = input.int(24, "Bars to wait for the trigger", minval = 3, maxval = 200, group = G_GA, display = display.none)
+gaMinMove = input.float(1.5, "Smallest move into the level (x ATR)", minval = 0.5, step = 0.25, group = G_GA, display = display.none)
 
 // ------------------------------------------------------------------ colors --
 cBull  = color.new(#16a34a, 0)
@@ -148,8 +160,14 @@ cNeu   = color.new(#94a3b8, 0)
 cText  = color.new(#e2e8f0, 0)
 cKey   = color.new(#94a3b8, 0)
 cWarn  = color.new(#f59e0b, 0)
+cGA    = color.new(#a855f7, 0)
+cOVc   = color.new(#22d3ee, 0)
+cOVp   = color.new(#f472b6, 0)
 
 // ----------------------------------------------------------------- helpers --
+f_k(float x) =>
+    na(x) ? "–" : x >= 1000 ? str.tostring(x / 1000, "#.#") + "k" : str.tostring(x, "#")
+
 f_px(float x) =>
     na(x) ? "–" : str.tostring(x, format.mintick)
 
@@ -720,7 +738,7 @@ if barstate.isconfirmed
         lnTp2 := line.new(bar_index, tp2Px, bar_index + 1, tp2Px, color = cBull, style = line.style_dotted, extend = extend.right)
 
 // ============================================================ strategies ==
-// Eight separate playbooks. Each one takes its own virtual trades on candle
+// Ten separate playbooks. Each one takes its own virtual trades on candle
 // close, independent of the ICT signals above, and keeps its own record.
 
 type Strat
@@ -752,6 +770,7 @@ var Strat sSP = Strat.new(code = "SPR", name = "Spread", unit = "%")
 var Strat sSC = Strat.new("SC", "Scalping")
 var Strat sOF = Strat.new("OF", "Order flow")
 var Strat sGX = Strat.new("GEX", "GEX + order flow")
+var Strat sGA = Strat.new("GAV", "GEX + AVWAP")
 
 f_open(Strat s, int dir, float sl, float tp1, float tp2, bool be, int maxBars, string tip) =>
     s.dir := dir
@@ -1145,6 +1164,8 @@ float flowScore = rvol < 0.5 ? 0.0 : math.max(-1, math.min(1, (0.15 * sfAbs + 0.
 // gex/latest.txt are pasted into the settings. They come in the options' own prices
 // (SPX, NDX, GLD...) and are moved onto the futures with the futures/underlying
 // ratio from regular-hours bars. Each snapshot applies from its time stamp on.
+// vk / vc / vp: today's busiest strikes by option volume (calls, puts), the
+// options-flow levels. Older snapshots in history.txt don't keep them.
 type GexSnap
     int    ts
     float  spot
@@ -1154,29 +1175,74 @@ type GexSnap
     float  total
     array<float> ks
     array<float> gs
+    array<float> vk
+    array<float> vc
+    array<float> vp
 
 f_gnum(string s) =>
     s == "na" or s == "" ? na : str.tonumber(str.replace_all(s, "+", ""))
+
+// Index of the options-flow strike at k (within 0.1%), or -1.
+f_flowAt(GexSnap s, float k) =>
+    int out = -1
+    if not na(s)
+        for [i, v] in s.vk
+            if math.abs(v - k) <= 0.001 * k and (out < 0 or math.abs(v - k) < math.abs(array.get(s.vk, out) - k))
+                out := i
+    out
 
 string gxRoot    = syminfo.root
 string gexAuto   = gxRoot == "NQ" or gxRoot == "MNQ" ? "NDX" : gxRoot == "ES" or gxRoot == "MES" ? "SPX" : gxRoot == "RTY" or gxRoot == "M2K" ? "RUT" : gxRoot == "YM" or gxRoot == "MYM" ? "DIA" : gxRoot == "GC" or gxRoot == "MGC" ? "GLD" : gxRoot == "SI" or gxRoot == "SIL" or gxRoot == "SIC" ? "SLV" : gxRoot == "CL" or gxRoot == "MCL" or gxRoot == "QM" ? "USO" : gxRoot == "NG" or gxRoot == "QG" or gxRoot == "MNG" ? "UNG" : gxRoot == "ZB" or gxRoot == "UB" ? "TLT" : ""
 string gexName   = gexUnd == "Auto" ? gexAuto : gexUnd
 string gexTicker = gexName == "SPX" ? "SP:SPX" : gexName == "SPY" ? "AMEX:SPY" : gexName == "NDX" ? "NASDAQ:NDX" : gexName == "QQQ" ? "NASDAQ:QQQ" : gexName == "RUT" ? "TVC:RUT" : gexName == "IWM" ? "AMEX:IWM" : gexName == "DIA" ? "AMEX:DIA" : gexName == "GLD" ? "AMEX:GLD" : gexName == "SLV" ? "AMEX:SLV" : gexName == "USO" ? "AMEX:USO" : gexName == "UNG" ? "AMEX:UNG" : gexName == "TLT" ? "NASDAQ:TLT" : ""
 
+// Kronos forecasts (forecast/kronos_forecast.py) ride in the same file as FC:<market>
+// lines, in futures prices: the newest one for this market is kept.
+string fcName = gxRoot == "NQ" or gxRoot == "MNQ" ? "FC:NQ" : gxRoot == "ES" or gxRoot == "MES" ? "FC:ES" : gxRoot == "RTY" or gxRoot == "M2K" ? "FC:RTY" : gxRoot == "YM" or gxRoot == "MYM" ? "FC:YM" : gxRoot == "GC" or gxRoot == "MGC" ? "FC:GC" : ""
+var int    fcTs   = na
+var float  fcLast = na
+var float  fc1h   = na
+var float  fc2h   = na
+var float  fcHi   = na
+var float  fcLo   = na
+var string fcHit  = ""
+
 var array<GexSnap> gexSnaps = array.new<GexSnap>()
-if barstate.isfirst and gexName != ""
+if barstate.isfirst and (gexName != "" or fcName != "")
     array<string> gexRows = str.split(gexText, "\n")
     for gl in gexRows
         array<string> tk = str.split(gl, " ")
-        if array.size(tk) >= 3 and array.get(tk, 1) == gexName and str.length(array.get(tk, 0)) >= 10
+        bool isGex = array.size(tk) >= 3 and gexName != "" and array.get(tk, 1) == gexName
+        bool isFc  = array.size(tk) >= 3 and fcName != "" and array.get(tk, 1) == fcName
+        if (isGex or isFc) and str.length(array.get(tk, 0)) >= 10
             string st = array.get(tk, 0)
             int yy = int(str.tonumber(str.substring(st, 0, 4)))
             int mo = int(str.tonumber(str.substring(st, 5, 7)))
             int dd = int(str.tonumber(str.substring(st, 8, 10)))
             int hh = str.length(st) >= 16 ? int(str.tonumber(str.substring(st, 11, 13))) : 9
             int mi = str.length(st) >= 16 ? int(str.tonumber(str.substring(st, 14, 16))) : 0
-            if not na(yy) and not na(mo) and not na(dd)
-                GexSnap snap = GexSnap.new(timestamp("America/New_York", yy, mo, dd, nz(hh, 9), nz(mi, 0)), na, na, na, na, na, array.new<float>(), array.new<float>())
+            int lts = na(yy) or na(mo) or na(dd) ? na : timestamp("America/New_York", yy, mo, dd, nz(hh, 9), nz(mi, 0))
+            if isFc and not na(lts) and (na(fcTs) or lts >= fcTs)
+                fcTs := lts
+                for i = 2 to array.size(tk) - 1
+                    array<string> kv = str.split(array.get(tk, i), "=")
+                    if array.size(kv) == 2
+                        string key = array.get(kv, 0)
+                        string val = array.get(kv, 1)
+                        if key == "last"
+                            fcLast := f_gnum(val)
+                        else if key == "c1h"
+                            fc1h := f_gnum(val)
+                        else if key == "c2h"
+                            fc2h := f_gnum(val)
+                        else if key == "hi"
+                            fcHi := f_gnum(val)
+                        else if key == "lo"
+                            fcLo := f_gnum(val)
+                        else if key == "hit"
+                            fcHit := val
+            if isGex and not na(lts)
+                GexSnap snap = GexSnap.new(lts, na, na, na, na, na, array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>(), array.new<float>())
                 for i = 2 to array.size(tk) - 1
                     array<string> kv = str.split(array.get(tk, i), "=")
                     if array.size(kv) == 2
@@ -1202,10 +1268,26 @@ if barstate.isfirst and gexName != ""
                                     if not na(kk) and not na(gg)
                                         array.push(snap.ks, kk)
                                         array.push(snap.gs, gg)
+                        else if key == "v"
+                            array<string> vpairs = str.split(val, ",")
+                            for pr in vpairs
+                                array<string> kc = str.split(pr, ":")
+                                if array.size(kc) == 2
+                                    array<string> cp = str.split(array.get(kc, 1), "/")
+                                    float kk = f_gnum(array.get(kc, 0))
+                                    if array.size(cp) == 2 and not na(kk)
+                                        array.push(snap.vk, kk)
+                                        array.push(snap.vc, nz(f_gnum(array.get(cp, 0))))
+                                        array.push(snap.vp, nz(f_gnum(array.get(cp, 1))))
                 int at = array.size(gexSnaps)
                 while at > 0 and array.get(gexSnaps, at - 1).ts > snap.ts
                     at -= 1
                 array.insert(gexSnaps, at, snap)
+
+// The chart's price when the forecast was made: Kronos's moves are added to it.
+var float fcAt = na
+if not na(fcTs) and time <= fcTs
+    fcAt := close
 
 // Futures/underlying ratio, from regular-hours bars when both trade, smoothed.
 float gexUndC = request.security(gexTicker == "" ? syminfo.tickerid : gexTicker, timeframe.period, close, ignore_invalid_symbol = true)
@@ -1222,12 +1304,65 @@ while gexIdx + 1 < array.size(gexSnaps) and array.get(gexSnaps, gexIdx + 1).ts <
 var int gexSeen = -1
 var int gexStartBar = na
 var int gexDayKey = na
-// The signals use the flip, the walls and each snapshot's 8 biggest strikes; the full
-// ladder is only drawn.
+
+// Each strong strike (the walls and the 8 biggest) gets a status for the day, set
+// further down: 1 held, -1 broke.
+var map<int, int> lvStat  = map.new<int, int>()
+var map<int, int> lvTouch = map.new<int, int>()
+var int lvHeldN  = 0
+var int lvBrokeN = 0
+var int lvDay    = na
+int nyDay = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
+if nyDay != lvDay
+    lvDay := nyDay
+    map.clear(lvStat)
+    map.clear(lvTouch)
+
+// Which levels count. Trusted only: the walls and the flip, plus a big strike only
+// where today's option volume is heavy too, and nothing once it broke today. The ETF
+// stand-ins (gold, silver, crude, gas, bonds) get just the walls and the flip.
+bool gxTrusted = gexMode == "Trusted only"
+bool gxProxy   = gexName == "GLD" or gexName == "SLV" or gexName == "USO" or gexName == "UNG" or gexName == "TLT"
+f_topK(GexSnap s) =>
+    array<float> out = array.new<float>()
+    if array.size(s.gs) > 0
+        array<float> ab = array.new<float>()
+        for g in s.gs
+            array.push(ab, math.abs(g))
+        array<int> od = array.sort_indices(ab, order.descending)
+        for j = 0 to math.min(8, array.size(od)) - 1
+            array.push(out, array.get(s.ks, array.get(od, j)))
+    out
+f_trustK(GexSnap s, array<float> top) =>
+    array<float> out = array.new<float>()
+    if not (gxTrusted and gxProxy)
+        for k in top
+            if not gxTrusted or f_flowAt(s, k) >= 0
+                array.push(out, k)
+    out
+f_broke(float k) =>
+    nz(map.get(lvStat, int(math.round(k * 100)))) == -1
+// The levels in futures prices: the flip, the walls and the given strikes.
+f_lvls(GexSnap s, array<float> ks) =>
+    array<float> out = array.new<float>()
+    if not na(s.flip)
+        array.push(out, s.flip * gexRatio)
+    array<float> cand = array.copy(ks)
+    if not na(s.cw)
+        array.push(cand, s.cw)
+    if not na(s.pw)
+        array.push(cand, s.pw)
+    for k in cand
+        if not (gxTrusted and f_broke(k))
+            array.push(out, k * gexRatio)
+    out
+
+// gxTopK: each snapshot's 8 biggest strikes (their status is tracked); gxSigK: the ones
+// the signals use.
 var array<float> gxTopK = array.new<float>()
+var array<float> gxSigK = array.new<float>()
 if gexIdx != gexSeen
     gexSeen := gexIdx
-    array.clear(gxTopK)
     if gexIdx >= 0
         GexSnap gs0 = array.get(gexSnaps, gexIdx)
         int gts = gs0.ts
@@ -1235,13 +1370,8 @@ if gexIdx != gexSeen
         if na(gexDayKey) or dk != gexDayKey
             gexDayKey := dk
             gexStartBar := bar_index
-        if array.size(gs0.gs) > 0
-            array<float> ab = array.new<float>()
-            for g in gs0.gs
-                array.push(ab, math.abs(g))
-            array<int> od = array.sort_indices(ab, order.descending)
-            for j = 0 to math.min(8, array.size(od)) - 1
-                array.push(gxTopK, array.get(gs0.ks, array.get(od, j)))
+        gxTopK := f_topK(gs0)
+        gxSigK := f_trustK(gs0, gxTopK)
 GexSnap gx = na
 if gexIdx >= 0
     gx := array.get(gexSnaps, gexIdx)
@@ -1254,14 +1384,7 @@ if gexOn
     gxFlip := gx.flip * gexRatio
     gxCw := gx.cw * gexRatio
     gxPw := gx.pw * gexRatio
-    if not na(gxFlip)
-        array.push(gxLv, gxFlip)
-    if not na(gxCw)
-        array.push(gxLv, gxCw)
-    if not na(gxPw)
-        array.push(gxLv, gxPw)
-    for kk in gxTopK
-        array.push(gxLv, kk * gexRatio)
+    gxLv := f_lvls(gx, gxSigK)
 
 // What the chart shows: on the last bar, the newest snapshot even if it was taken after
 // that bar (a weekend or pre-market run), so the levels on screen are always the latest.
@@ -1270,7 +1393,9 @@ GexSnap gxD = gx
 float gxDF = gxFlip
 float gxDC = gxCw
 float gxDP = gxPw
-array<float> gxDLv = gxLv
+array<float> gxDTop = gxTopK
+array<float> gxDK   = gxSigK
+array<float> gxDLv  = gxLv
 if barstate.islast and array.size(gexSnaps) > 0 and not na(gexRatio)
     GexSnap nw = array.last(gexSnaps)
     if na(gx) or nw.ts > gx.ts
@@ -1278,20 +1403,9 @@ if barstate.islast and array.size(gexSnaps) > 0 and not na(gexRatio)
         gxDF := nw.flip * gexRatio
         gxDC := nw.cw * gexRatio
         gxDP := nw.pw * gexRatio
-        gxDLv := array.new<float>()
-        if not na(gxDF)
-            array.push(gxDLv, gxDF)
-        if not na(gxDC)
-            array.push(gxDLv, gxDC)
-        if not na(gxDP)
-            array.push(gxDLv, gxDP)
-        if array.size(nw.gs) > 0
-            array<float> ab2 = array.new<float>()
-            for g in nw.gs
-                array.push(ab2, math.abs(g))
-            array<int> od2 = array.sort_indices(ab2, order.descending)
-            for j = 0 to math.min(8, array.size(od2)) - 1
-                array.push(gxDLv, array.get(nw.ks, array.get(od2, j)) * gexRatio)
+        gxDTop := f_topK(nw)
+        gxDK := f_trustK(nw, gxDTop)
+        gxDLv := f_lvls(nw, gxDK)
 bool gexShowOn = not na(gxD) and not na(gexRatio)
 
 // A GEX level tested and held this bar, with absorption or a delta reversal on it.
@@ -1313,16 +1427,6 @@ string gxRegime = na(gxFlip) ? "" : close > gxFlip ? "positive gamma, above the 
 // a candle tests it and closes back on its side with absorption or a delta flip, broke
 // when a candle closes through it with delta behind the move. Touches are counted so
 // retests show. The first outcome per level per day feeds the held / tested record.
-var map<int, int> lvStat  = map.new<int, int>()
-var map<int, int> lvTouch = map.new<int, int>()
-var int lvHeldN  = 0
-var int lvBrokeN = 0
-var int lvDay    = na
-int nyDay = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
-if nyDay != lvDay
-    lvDay := nyDay
-    map.clear(lvStat)
-    map.clear(lvTouch)
 if barstate.isconfirmed and gexOn
     array<float> strong = array.copy(gxTopK)
     if not na(gx.cw)
@@ -1353,6 +1457,112 @@ f_nextLevel(array<float> lvls, int dir, float entry, float risk) =>
         if (x - entry) * dir >= minRR * risk and (na(best) or math.abs(x - entry) < math.abs(best - entry))
             best := x
     na(best) ? entry + dir * 2.0 * risk : best
+
+// 10. GEX + anchored VWAP. GEX says where price may turn; a VWAP anchored at the start
+// of the move into the level says whether that move is still in control. A test is a
+// candle reaching a level after a move of at least gaMinMove ATR, with price still on
+// the move's side of the AVWAP (anchored at the move's start: the highest high or
+// lowest low of the last gaLook bars). Then:
+//   reversal: price holds the level and closes back through the AVWAP. Trade back
+//   toward the next level, stop past the extreme of the test.
+//   continuation: price closes through the level while the AVWAP holds, moves away,
+//   then retests the level from the other side and holds. Trade with the move, stop
+//   past the level; a close back through the AVWAP ends it.
+// The idea is dropped when the AVWAP gives way first, price reclaims a broken level,
+// or nothing happens within gaWait bars.
+float gaCumPV = ta.cum(hlc3 * nz(volume))
+float gaCumV  = ta.cum(nz(volume))
+int   gaHiAgo = -ta.highestbars(high, gaLook)
+int   gaLoAgo = -ta.lowestbars(low, gaLook)
+// The AVWAP from a start whose running totals just before it were pv0 and v0.
+f_avw(float pv0, float v0) =>
+    float v = gaCumV - v0
+    na(pv0) or na(v0) or v <= 0 ? na : (gaCumPV - pv0) / v
+
+var int   gaMove   = 0      // the move into the level: -1 down into support, 1 up into resistance
+var int   gaPhase  = 0      // 0 idle, 1 at the level, 2 broke it and waiting for the retest
+var float gaLvl    = na
+var int   gaAnchor = na
+var float gaPV0    = na     // running totals before the anchor
+var float gaV0     = na
+var int   gaBar    = na
+var float gaExt    = na
+var bool  gaAway   = false
+var int   gaTrAnchor = na   // the open trade's anchor, totals, move and type
+var float gaTrPV0    = na
+var float gaTrV0     = na
+var int   gaTrMove   = 0
+var bool  gaTrCont   = false
+int    gaTrig  = 0
+float  gaStop  = na
+string gaWhy   = ""
+float  gaAv    = f_avw(gaPV0, gaV0)
+float  gaTrAv  = f_avw(gaTrPV0, gaTrV0)
+if barstate.isconfirmed and useGA
+    int m = gaMove
+    if gaPhase == 1
+        gaExt := m == -1 ? math.min(gaExt, low) : math.max(gaExt, high)
+        if not na(gaAv) and (m == -1 ? close > gaAv and close > gaLvl : close < gaAv and close < gaLvl)
+            gaTrig := -m
+            gaStop := m == -1 ? gaExt - stopAtr * atr : gaExt + stopAtr * atr
+            gaWhy  := "Held GEX " + f_px(gaLvl) + " and closed back " + (m == -1 ? "above" : "below") + " the AVWAP " + f_px(gaAv)
+            gaPhase := 0
+        else if not na(gaAv) and (m == -1 ? close < gaLvl - gxTol and close < gaAv : close > gaLvl + gxTol and close > gaAv)
+            gaPhase := 2
+            gaBar := bar_index
+            gaAway := m == -1 ? close < gaLvl - gxTol - 0.5 * atr : close > gaLvl + gxTol + 0.5 * atr
+        else if bar_index - gaBar > gaWait
+            gaPhase := 0
+    else if gaPhase == 2
+        if na(gaAv) or (m == -1 ? close > gaAv : close < gaAv)
+            gaPhase := 0
+        else if m == -1 ? close > gaLvl + gxTol : close < gaLvl - gxTol
+            gaPhase := 0
+        else if gaAway and bar_index > gaBar and (m == -1 ? high >= gaLvl - gxTol and close < gaLvl : low <= gaLvl + gxTol and close > gaLvl)
+            gaTrig := m
+            gaStop := m == -1 ? math.max(high, gaLvl) + stopAtr * atr : math.min(low, gaLvl) - stopAtr * atr
+            gaWhy  := "Broke GEX " + f_px(gaLvl) + " with the AVWAP " + f_px(gaAv) + " holding, and the retest held"
+            gaPhase := 0
+        else if bar_index - gaBar > gaWait
+            gaPhase := 0
+        else if not gaAway
+            gaAway := m == -1 ? low < gaLvl - gxTol - 0.5 * atr : high > gaLvl + gxTol + 0.5 * atr
+    // A new test, when no idea is open.
+    if gaPhase == 0 and gaTrig == 0 and gexOn
+        float lvDn = na
+        float lvUp = na
+        for lv in gxLv
+            if close[1] > lv and low <= lv + gxTol and (na(lvDn) or lv > lvDn)
+                lvDn := lv
+            if close[1] < lv and high >= lv - gxTol and (na(lvUp) or lv < lvUp)
+                lvUp := lv
+        bool dnOk = not na(lvDn) and gaHiAgo >= 3 and high[gaHiAgo] - low >= gaMinMove * atr
+        bool upOk = not na(lvUp) and gaLoAgo >= 3 and high - low[gaLoAgo] >= gaMinMove * atr
+        // Both at once (a wide bar): the side the bar closed toward.
+        if dnOk and upOk
+            dnOk := close < open
+            upOk := not dnOk
+        int   nm  = dnOk ? -1 : upOk ? 1 : 0
+        int   ago = nm == -1 ? gaHiAgo : nm == 1 ? gaLoAgo : na
+        float pv0 = na(ago) or ago >= 990 ? na : ago < bar_index ? gaCumPV[ago + 1] : 0.0
+        float v0  = na(ago) or ago >= 990 ? na : ago < bar_index ? gaCumV[ago + 1] : 0.0
+        float av0 = f_avw(pv0, v0)
+        float lv0 = nm == -1 ? lvDn : lvUp
+        if nm != 0 and not na(av0) and (nm == -1 ? close < av0 : close > av0)
+            gaMove := nm
+            gaLvl := lv0
+            gaAnchor := bar_index - ago
+            gaPV0 := pv0
+            gaV0 := v0
+            gaBar := bar_index
+            gaExt := nm == -1 ? low : high
+            gaAway := false
+            gaPhase := 1
+            // The test candle can break the level outright.
+            if nm == -1 ? close < lv0 - gxTol : close > lv0 + gxTol
+                gaPhase := 2
+                gaAway := nm == -1 ? close < lv0 - gxTol - 0.5 * atr : close > lv0 + gxTol + 0.5 * atr
+float gaAvNow = f_avw(gaPV0, gaV0)
 
 // Entries and exits, on candle close.
 bool anyStratEntry = false
@@ -1465,15 +1675,33 @@ if barstate.isconfirmed
             f_open(sGX, d, sl, f_nextLevel(gxLv, d, close, rk), na, false, 0, "GEX level " + f_px(lvl) + " held · " + ((d == 1 ? absBull : absBear) ? "absorption" : "delta reversal") + (gxRegime == "" ? "" : " · " + gxRegime))
             anyStratEntry := true
 
+    // GEX + AVWAP: a continuation trade also ends on a close back through its AVWAP.
+    bool flatGA = sGA.dir == 0
+    f_manage(sGA, gaTrCont and not na(gaTrAv) and (sGA.dir == 1 ? close < gaTrAv : close > gaTrAv), "Closed back through the AVWAP")
+    if flatGA and useGA and sOk and gaTrig != 0
+        int   d  = gaTrig
+        float rk = (close - gaStop) * d
+        if rk > mintickSafe and rk <= maxRiskAtr * atr
+            f_open(sGA, d, gaStop, f_nextLevel(gxLv, d, close, rk), na, false, 0, gaWhy + (gxRegime == "" ? "" : " · " + gxRegime))
+            gaTrAnchor := gaAnchor
+            gaTrPV0 := gaPV0
+            gaTrV0 := gaV0
+            gaTrMove := gaMove
+            gaTrCont := d == gaMove
+            anyStratEntry := true
+
 alertcondition(anyStratEntry, "Strategy entry (any)", "ICT Dash: a strategy entry fired on {{ticker}} {{interval}}")
 
-// GEX on the chart: a ladder of every strike within the chosen range of price, green
-// for positive GEX and red for negative, bolder and thicker for more gamma. Only the
-// strong levels get a tag: the walls and the 3 biggest strikes are grade A, the next
-// 5 grade B. Every tagged level is a bounce level: L below price (support), S above
-// (resistance). Its status shows whether it is legit today: ✓ held (a test closed back
-// with absorption or a delta flip), ✗ broke (closed through with delta behind it, don't
-// fade it), or retest (touched before, weaker). Hover a tag for the details.
+// GEX on the chart. Trusted only (the default): the call wall, the put wall and the
+// gamma flip, plus any of the 8 biggest strikes where today's option volume is heavy
+// too (★ flow), until it breaks. Strong levels: the walls, the flip and the 8 biggest.
+// Full ladder adds every strike within the chosen range, green for positive GEX and
+// red for negative, bolder for more gamma. The walls and the 3 biggest strikes are
+// grade A, the next 5 grade B. L below price (support: look for a bounce long), S
+// above (resistance: look for a bounce short). Status: ✓ held (a test closed back with
+// absorption or a delta flip), ✗ broke (closed through with delta behind it, don't
+// fade it), or retest (touched before, weaker). OV marks today's busiest option
+// strikes: teal when calls dominate, pink when puts do. Hover any tag for details.
 var array<line>  gxLines  = array.new<line>()
 var array<label> gxLabels = array.new<label>()
 f_glabel(float y, color c, string txt, string sz, string tip) =>
@@ -1484,8 +1712,14 @@ f_gexAt(GexSnap s, float k) =>
         if kk == k
             out := array.get(s.gs, i)
     out
-// Tag text, color and tooltip for a strong level.
-f_tag(float k, float y, string grade, string name, float gv) =>
+f_near(array<float> placed, float y) =>
+    bool out = false
+    for d in placed
+        if math.abs(d - y) <= 0.5 * atr
+            out := true
+    out
+// Tag text, color and tooltip for a strong level. fi: its options-flow index, or -1.
+f_tag(float k, float y, string grade, string name, float gv, int fi) =>
     int    key  = int(math.round(k * 100))
     int    st   = nz(map.get(lvStat, key))
     int    tch  = nz(map.get(lvTouch, key))
@@ -1493,8 +1727,9 @@ f_tag(float k, float y, string grade, string name, float gv) =>
     string dir  = isL ? "L" : "S"
     string stat = st == 1 ? "  ✓ held" : st == -1 ? "  ✗ broke" : tch >= 2 ? "  · retest" : ""
     color  c    = st == -1 ? cNeu : color.new(isL ? cBull : cBear, st == 0 and tch >= 2 ? 45 : 0)
-    string txt  = grade + " " + dir + "  " + name + f_px(y) + (na(gv) ? "" : " · " + f_signed(gv, "#.##") + "B") + stat
-    string tip  = "Grade " + grade + (grade == "A" ? " (a wall or one of the 3 biggest strikes)" : " (one of the next 5 biggest strikes)") + ". " + (isL ? "Support below price: look for a bounce long." : "Resistance above price: look for a bounce short.") + " Wait for a candle to close at the level with absorption or delta flipping " + (isL ? "up" : "down") + ", then enter on the pullback, not the spike. " + (st == 1 ? "Today: it held." : st == -1 ? "Today: it broke with delta behind it, so don't fade it." : tch >= 2 ? "Tested " + str.tostring(tch) + " times today, so it's weaker." : tch == 1 ? "Tested once today, no clear result yet." : "Not tested yet today.")
+    string txt  = grade + " " + dir + "  " + name + f_px(y) + (na(gv) ? "" : " · " + f_signed(gv, "#.##") + "B") + (fi >= 0 ? "  ★ flow" : "") + stat
+    string flw  = fi >= 0 ? " ★ flow: heavy option volume here today too (" + f_k(array.get(gxD.vc, fi)) + " calls, " + f_k(array.get(gxD.vp, fi)) + " puts), so the level is more likely to matter." : ""
+    string tip  = "Grade " + grade + (grade == "A" ? " (a wall or one of the 3 biggest strikes)" : " (one of the next 5 biggest strikes)") + "." + flw + " " + (isL ? "Support below price: look for a bounce long." : "Resistance above price: look for a bounce short.") + " Wait for a candle to close at the level with absorption or delta flipping " + (isL ? "up" : "down") + ", then enter on the pullback, not the spike. " + (st == 1 ? "Today: it held." : st == -1 ? "Today: it broke with delta behind it, so don't fade it." : tch >= 2 ? "Tested " + str.tostring(tch) + " times today, so it's weaker." : tch == 1 ? "Tested once today, no clear result yet." : "Not tested yet today.")
     [txt, c, tip]
 if barstate.islast
     for ln in gxLines
@@ -1508,38 +1743,40 @@ if barstate.islast
         float lo  = close * (1 - gexRange / 100)
         float hi  = close * (1 + gexRange / 100)
         float far = close * 2 * gexRange / 100
-        // Strength is scaled to the 85th percentile of the strikes in range, so one huge
-        // wall doesn't wash out every other level.
-        array<float> inRange = array.new<float>()
-        for [i, kk] in gxD.ks
-            float y = kk * gexRatio
-            if y >= lo and y <= hi
-                array.push(inRange, math.abs(array.get(gxD.gs, i)))
-        float gMax = array.size(inRange) > 0 ? array.percentile_nearest_rank(inRange, 85) : 0.0
-        if gMax > 0
+        if gexMode == "Full ladder"
+            // Strength is scaled to the 85th percentile of the strikes in range, so one
+            // huge wall doesn't wash out every other level.
+            array<float> inRange = array.new<float>()
             for [i, kk] in gxD.ks
                 float y = kk * gexRatio
                 if y >= lo and y <= hi
-                    float gv = array.get(gxD.gs, i)
-                    float sh = math.min(1.0, math.abs(gv) / gMax)
-                    int   tr = int(math.round(60 - 60 * math.sqrt(sh)))
-                    array.push(gxLines, line.new(x1, y, bar_index + 3, y, color = color.new(gv >= 0 ? cBull : cBear, tr), width = 1 + int(math.round(3 * sh)), style = sh >= 0.15 ? line.style_solid : line.style_dotted))
+                    array.push(inRange, math.abs(array.get(gxD.gs, i)))
+            float gMax = array.size(inRange) > 0 ? array.percentile_nearest_rank(inRange, 85) : 0.0
+            if gMax > 0
+                for [i, kk] in gxD.ks
+                    float y = kk * gexRatio
+                    if y >= lo and y <= hi
+                        float gv = array.get(gxD.gs, i)
+                        float sh = math.min(1.0, math.abs(gv) / gMax)
+                        int   tr = int(math.round(60 - 60 * math.sqrt(sh)))
+                        array.push(gxLines, line.new(x1, y, bar_index + 3, y, color = color.new(gv >= 0 ? cBull : cBear, tr), width = 1 + int(math.round(3 * sh)), style = sh >= 0.15 ? line.style_solid : line.style_dotted))
         array<float> placed = array.new<float>()
         if not na(gxDC) and math.abs(gxDC - close) <= far
-            [tg1, cg1, pg1] = f_tag(gxD.cw, gxDC, "A", "Call wall ", f_gexAt(gxD, gxD.cw))
-            array.push(gxLines, line.new(x1, gxDC, bar_index + 3, gxDC, color = cBull, width = 3))
+            [tg1, cg1, pg1] = f_tag(gxD.cw, gxDC, "A", "Call wall ", f_gexAt(gxD, gxD.cw), f_flowAt(gxD, gxD.cw))
+            array.push(gxLines, line.new(x1, gxDC, bar_index + 3, gxDC, color = f_broke(gxD.cw) ? cNeu : cBull, width = 3))
             array.push(gxLabels, f_glabel(gxDC, cg1, tg1, size.small, pg1))
             array.push(placed, gxDC)
         if not na(gxDP) and math.abs(gxDP - close) <= far
-            [tg2, cg2, pg2] = f_tag(gxD.pw, gxDP, "A", "Put wall ", f_gexAt(gxD, gxD.pw))
-            array.push(gxLines, line.new(x1, gxDP, bar_index + 3, gxDP, color = cBear, width = 3))
+            [tg2, cg2, pg2] = f_tag(gxD.pw, gxDP, "A", "Put wall ", f_gexAt(gxD, gxD.pw), f_flowAt(gxD, gxD.pw))
+            array.push(gxLines, line.new(x1, gxDP, bar_index + 3, gxDP, color = f_broke(gxD.pw) ? cNeu : cBear, width = 3))
             array.push(gxLabels, f_glabel(gxDP, cg2, tg2, size.small, pg2))
             array.push(placed, gxDP)
         if not na(gxDF) and math.abs(gxDF - close) <= far
             array.push(gxLines, line.new(x1, gxDF, bar_index + 3, gxDF, color = cWarn, width = 2, style = line.style_dashed))
             array.push(gxLabels, f_glabel(gxDF, cWarn, "γ flip " + f_px(gxDF) + (close > gxDF ? " · price above (+γ, calmer)" : " · price below (−γ, faster)"), size.small, "Gamma flip: above it moves tend to be calm and levels hold more; below it moves are faster and levels break more often."))
             array.push(placed, gxDF)
-        // The 8 biggest strikes: 3 grade A, 5 grade B.
+        // The 8 biggest strikes: 3 grade A, 5 grade B. Trusted only shows the ones with
+        // ★ flow that haven't broken today.
         array<float> absg = array.new<float>()
         for g in gxD.gs
             array.push(absg, math.abs(g))
@@ -1551,15 +1788,61 @@ if barstate.islast
                 if kx != gxD.cw and kx != gxD.pw
                     rank += 1
                     float y = kx * gexRatio
-                    if y >= lo and y <= hi
-                        bool crowded = false
-                        for d in placed
-                            if math.abs(d - y) <= 0.5 * atr
-                                crowded := true
-                        if not crowded
-                            [tg3, cg3, pg3] = f_tag(kx, y, rank <= 3 ? "A" : "B", "", array.get(gxD.gs, ix))
-                            array.push(gxLabels, f_glabel(y, cg3, tg3, rank <= 3 ? size.small : size.tiny, pg3))
-                            array.push(placed, y)
+                    if y >= lo and y <= hi and array.includes(gxDK, kx) and not (gxTrusted and f_broke(kx)) and not f_near(placed, y)
+                        [tg3, cg3, pg3] = f_tag(kx, y, rank <= 3 ? "A" : "B", "", array.get(gxD.gs, ix), f_flowAt(gxD, kx))
+                        if gexMode != "Full ladder"
+                            array.push(gxLines, line.new(x1, y, bar_index + 3, y, color = color.new(cg3, rank <= 3 ? 0 : 30), width = rank <= 3 ? 2 : 1))
+                        array.push(gxLabels, f_glabel(y, cg3, tg3, rank <= 3 ? size.small : size.tiny, pg3))
+                        array.push(placed, y)
+        // Options flow: today's busiest strikes, busiest first. One that sits on a GEX
+        // tag is left to the tag's ★ flow.
+        if showOV and array.size(gxD.vk) > 0
+            array<float> tot = array.new<float>()
+            for [i, v] in gxD.vk
+                array.push(tot, array.get(gxD.vc, i) + array.get(gxD.vp, i))
+            array<int> ovOrd = array.sort_indices(tot, order.descending)
+            string combo = gexName == "SPX" ? "SPX + SPY" : gexName == "NDX" ? "NDX + QQQ" : gexName == "RUT" ? "RUT + IWM" : gexName == "DIA" ? "DIA + DJX" : gexName
+            int shown = 0
+            for ix in ovOrd
+                float k = array.get(gxD.vk, ix)
+                float y = k * gexRatio
+                if shown < nOV and math.abs(y - close) <= far
+                    shown += 1
+                    if not f_near(placed, y)
+                        float c  = array.get(gxD.vc, ix)
+                        float p  = array.get(gxD.vp, ix)
+                        color oc = c >= 1.5 * p ? cOVc : p >= 1.5 * c ? cOVp : cText
+                        array.push(gxLines, line.new(x1, y, bar_index + 3, y, color = color.new(oc, 25), width = 1, style = line.style_dotted))
+                        array.push(gxLabels, f_glabel(y, oc, "OV  " + f_px(y) + " · " + f_k(c) + " C / " + f_k(p) + " P", size.tiny, "Options flow: one of today's busiest strikes near price (" + combo + " options, strike " + str.tostring(k) + ", volume as of " + str.format_time(gxD.ts, "HH:mm", "America/New_York") + " ET). " + (c >= 1.5 * p ? "Mostly calls." : p >= 1.5 * c ? "Mostly puts." : "Calls and puts about even.") + " Busy strikes often pull price in or stall it, most of all where they also carry big GEX (★ flow on a GEX tag)."))
+                        array.push(placed, y)
+
+// The anchored VWAP: the open idea's or trade's (solid), else the current move's
+// (dotted), from the move's start to now.
+var polyline gaPoly = na
+var label    gaLab  = na
+if barstate.islast
+    polyline.delete(gaPoly)
+    label.delete(gaLab)
+    if useGA and gaShow
+        bool idea   = gaPhase != 0
+        bool trade  = not idea and sGA.dir != 0 and not na(gaTrAnchor)
+        int  anc    = idea ? gaAnchor : trade ? gaTrAnchor : gaHiAgo < gaLoAgo ? bar_index - gaHiAgo : bar_index - gaLoAgo
+        bool fromHi = idea ? gaMove == -1 : trade ? gaTrMove == -1 : gaHiAgo < gaLoAgo
+        int  off    = na(anc) ? na : bar_index - anc
+        if not na(off) and off >= 3 and off < 990
+            float bpv = anc > 0 ? gaCumPV[off + 1] : 0.0
+            float bv  = anc > 0 ? gaCumV[off + 1] : 0.0
+            array<chart.point> pts = array.new<chart.point>()
+            for j = off to 0
+                float vv = gaCumV[j] - bv
+                if vv > 0
+                    array.push(pts, chart.point.from_index(bar_index - j, (gaCumPV[j] - bpv) / vv))
+            if array.size(pts) >= 2
+                bool solid = idea or trade
+                float avNow = array.last(pts).price
+                gaPoly := polyline.new(pts, line_color = color.new(cGA, solid ? 0 : 45), line_width = solid ? 2 : 1, line_style = solid ? line.style_solid : line.style_dotted)
+                string gaTip = idea ? "Anchored VWAP from the start of the move into GEX " + f_px(gaLvl) + ". " + (gaPhase == 1 ? (gaMove == -1 ? "A close above it means buyers took over: long. A break of the level with it holding means short the retest." : "A close below it means sellers took over: short. A break of the level with it holding means long the retest.") : (gaMove == -1 ? "The level broke with it holding: short a retest of " + f_px(gaLvl) + " that holds. A close above it ends the idea." : "The level broke with it holding: long a retest of " + f_px(gaLvl) + " that holds. A close below it ends the idea.")) : trade ? "Anchored VWAP of the open GEX + AVWAP trade." : "Anchored VWAP from the start of the current move (the " + (fromHi ? "high" : "low") + " of the last " + str.tostring(gaLook) + " bars). Price is " + (close > avNow ? "above" : "below") + " it, so " + (close > avNow ? "buyers" : "sellers") + " control the move. When price reaches a GEX level, watch whether it closes back through this line."
+                gaLab := label.new(anc, fromHi ? high[off] : low[off], "AVWAP", style = fromHi ? label.style_label_down : label.style_label_up, color = color.new(cGA, solid ? 20 : 60), textcolor = color.white, size = size.tiny, tooltip = gaTip)
 
 // -------------------------------------------------------------- drawings --
 var line fibLine = na
@@ -1591,6 +1874,9 @@ plotshape(bigTierS == 2 ? bigSellPx : na, "Big sell print 1.5x", shape.circle, l
 plotshape(bigTierS == 3 ? bigSellPx : na, "Big sell print 2.25x", shape.circle, location.absolute, color.new(cBear, 40), size = size.normal, display = display.pane)
 plotshape(bigTierS == 4 ? bigSellPx : na, "Big sell print 3.5x", shape.circle, location.absolute, color.new(cBear, 45), size = size.large, display = display.pane)
 plotshape(bigTierS == 5 ? bigSellPx : na, "Big sell print 5x", shape.circle, location.absolute, color.new(cBear, 50), size = size.huge, display = display.pane)
+// The GEX + AVWAP anchored VWAP while an idea or a trade is open.
+float gaPlotAv = not (useGA and gaShow) ? na : gaPhase != 0 ? f_avw(gaPV0, gaV0) : sGA.dir != 0 ? f_avw(gaTrPV0, gaTrV0) : na
+plot(gaPlotAv, "GEX + AVWAP: anchored VWAP", color = cGA, linewidth = 2, style = plot.style_linebr, display = display.pane)
 
 // ---------------------------------------------------------------- alerts --
 alertcondition(longSignal, "Long signal", "ICT Dash: LONG on {{ticker}} {{interval}} at {{close}}")
@@ -1602,10 +1888,14 @@ if longSignal or shortSignal
 if exitLong or exitShort
     alert((exitLong ? "SELL " : "COVER ") + syminfo.ticker + " " + f_tf(timeframe.period) + " @ " + f_px(exitPx) + " | " + exitWhy, alert.freq_once_per_bar_close)
 
+// ------------------------------------------------------------ record text --
+f_rec(Strat s) =>
+    s.n == 0 ? "no trades yet" : str.tostring(100.0 * s.wins / s.n, "#") + "% won · " + f_signed(s.totR / s.n, "#.##") + s.unit + " · " + str.tostring(s.n)
+
 // ------------------------------------------------------------- dashboard --
 string tblPos = dashPos == "Top left" ? position.top_left : dashPos == "Bottom right" ? position.bottom_right : dashPos == "Bottom left" ? position.bottom_left : position.top_right
 string txtSize = dashSize == "Tiny" ? size.tiny : dashSize == "Normal" ? size.normal : size.small
-var table dash = table.new(tblPos, 2, 15, bgcolor = color.new(#0b1220, 10), frame_color = color.new(#334155, 0), frame_width = 1, border_color = color.new(#1e293b, 0), border_width = 1)
+var table dash = table.new(tblPos, 2, 17, bgcolor = color.new(#0b1220, 10), frame_color = color.new(#334155, 0), frame_width = 1, border_color = color.new(#1e293b, 0), border_width = 1)
 
 f_row(int row, string key, string val, color vc, string tip = "") =>
     table.cell(dash, 0, row, key, text_color = cKey, text_size = txtSize, text_halign = text.align_left)
@@ -1735,9 +2025,41 @@ if barstate.islast
     string histTxt = nTrades == 0 ? "no signals " + sinceTxt : str.tostring(nTrades) + " trades " + sinceTxt + " · " + str.tostring(100.0 * nWins / nTrades, "#") + "% won · avg " + f_signed(sumR / nTrades, "#.##") + "R"
     f_row(14, "History (no fees)", histTxt, nTrades == 0 ? cNeu : sumR >= 0 ? cBull : cBear, lastTxt)
 
-// ------------------------------------------------------------ record text --
-f_rec(Strat s) =>
-    s.n == 0 ? "no trades yet" : str.tostring(100.0 * s.wins / s.n, "#") + "% won · " + f_signed(s.totR / s.n, "#.##") + s.unit + " · " + str.tostring(s.n)
+    // GEX + AVWAP: what the setup is waiting for.
+    if useGA
+        string gaTxt = ""
+        color  gaC   = cGA
+        if sGA.dir != 0
+            gaTxt := "IN " + (sGA.dir == 1 ? "LONG " : "SHORT ") + f_px(sGA.entry) + " · stop " + f_px(sGA.stop) + " · target " + f_px(sGA.tp1) + (gaTrCont and not na(gaTrAv) ? " · out on a close back through " + f_px(gaTrAv) : "")
+            gaC := sGA.dir == 1 ? cBull : cBear
+        else if gaPhase == 1
+            gaTxt := "At GEX " + f_px(gaLvl) + ": " + (gaMove == -1 ? "long on a close above " : "short on a close below ") + f_px(gaAvNow) + " · if it breaks, " + (gaMove == -1 ? "short" : "long") + " the retest"
+        else if gaPhase == 2
+            gaTxt := "Broke GEX " + f_px(gaLvl) + ": " + (gaMove == -1 ? "short" : "long") + " a retest that holds · off if it closes " + (gaMove == -1 ? "above " : "below ") + f_px(gaAvNow)
+        else
+            int   mAgo = gaHiAgo < gaLoAgo ? gaHiAgo : gaLoAgo
+            float mAv  = na(mAgo) or mAgo < 3 or mAgo >= bar_index or mAgo >= 990 ? na : f_avw(gaCumPV[mAgo + 1], gaCumV[mAgo + 1])
+            gaTxt := "No level test yet" + (na(mAv) ? "" : " · move's AVWAP " + f_px(mAv) + (close > mAv ? " (buyers in control)" : " (sellers in control)"))
+            gaC := cNeu
+        f_row(15, "GEX + AVWAP", gaTxt, gaC, "Reversal: price reaches a GEX level and closes back through the VWAP anchored at the start of the move into it. Continuation: the level breaks while that AVWAP holds, then a retest holds. Record on this chart: " + f_rec(sGA))
+
+    // Kronos forecast (forecast/kronos_forecast.py, every 30 minutes).
+    if showFC and fcName != ""
+        string fcTxt = "Paste the newest gex/history.txt to see it"
+        color  fcC   = cNeu
+        string fcTip = "Kronos (github.com/shiyu-coder/Kronos) is an open-source model trained on candlestick charts. The GitHub Action asks it for the next 2 hours of 5-minute bars every 30 minutes. An experiment: don't trade it on its own."
+        if not na(fcTs) and not na(fcLast)
+            float  d1  = fc1h - fcLast
+            float  d2  = fc2h - fcLast
+            float  base = nz(fcAt, fcLast)
+            array<string> hn = str.split(fcHit, "/")
+            int    hh  = array.size(hn) == 2 ? int(nz(str.tonumber(array.get(hn, 0)))) : 0
+            int    hN  = array.size(hn) == 2 ? int(nz(str.tonumber(array.get(hn, 1)))) : 0
+            bool   old = time - fcTs > 3 * 3600000
+            fcTxt := (d2 > 0 ? "▲ " : d2 < 0 ? "▼ " : "– ") + "2h " + f_px(base + d2) + " (" + f_signed(d2, "#.##") + ") · 1h " + f_signed(d1, "#.##") + " · " + (hN == 0 ? "not scored yet" : "right " + str.tostring(hh) + "/" + str.tostring(hN)) + (old ? " · old: " + str.format_time(fcTs, "MMM d HH:mm", "America/New_York") : "")
+            fcC := old or hN < 10 or hh < 0.55 * hN ? cNeu : d2 > 0 ? cBull : d2 < 0 ? cBear : cNeu
+            fcTip += "\nForecast from " + str.format_time(fcTs, "MMM d HH:mm", "America/New_York") + " ET: 1 hour " + f_px(base + d1) + ", 2 hours " + f_px(base + d2) + ", range " + f_px(base + fcLo - fcLast) + " – " + f_px(base + fcHi - fcLast) + ".\nIts 1-hour direction call was right " + str.tostring(hh) + " of the last " + str.tostring(hN) + " times it was scored. Gray until it has 10 calls scored and 55% right."
+        f_row(16, "Kronos 2h", fcTxt, fcC, fcTip)
 
 // ------------------------------------------------------- best long / short --
 // Every strategy proposes where it would get in on each side, its stop and its exit.
@@ -1921,6 +2243,22 @@ if barstate.islast and showBest
         if not na(res)
             float sl = res + stopAtr * atr + 0.25 * atr
             f_plan(shorts, -1, "GEX + order flow", res, sl, f_nextLevel(gxDLv, -1, res, sl - res), "limit", f_edge(sGX.totR, sGX.n), f_rec(sGX), "Sell absorption or a delta reversal at the GEX level " + f_px(res) + (gxRegime == "" ? "" : ". Now " + gxRegime), false)
+
+    // GEX + AVWAP: the open idea's trigger.
+    bool gaLiveL = f_livePlan(longs, sGA, 1)
+    bool gaLiveS = f_livePlan(shorts, sGA, -1)
+    if useGA and gaPhase != 0 and not na(gaAvNow)
+        int m = gaMove
+        if gaPhase == 1 and not (m == -1 ? gaLiveL : gaLiveS)
+            float sl = m == -1 ? gaExt - stopAtr * atr : gaExt + stopAtr * atr
+            float rk = (gaAvNow - sl) * -m
+            if rk > 0 and rk <= maxRiskAtr * atr
+                f_plan(m == -1 ? longs : shorts, -m, "GEX + AVWAP", gaAvNow, sl, f_nextLevel(gxDLv, -m, gaAvNow, rk), "on close", f_edge(sGA.totR, sGA.n), f_rec(sGA), "Price came " + (m == -1 ? "down" : "up") + " into GEX " + f_px(gaLvl) + ". " + (m == -1 ? "Buy a close above" : "Sell a close below") + " the anchored VWAP: the move lost control. Wrong past " + f_px(gaExt), false)
+        if gaPhase == 2 and not (m == -1 ? gaLiveS : gaLiveL)
+            float sl = m == -1 ? gaLvl + gxTol + stopAtr * atr : gaLvl - gxTol - stopAtr * atr
+            float rk = (gaLvl - sl) * m
+            if rk > 0 and rk <= maxRiskAtr * atr
+                f_plan(m == -1 ? shorts : longs, m, "GEX + AVWAP", gaLvl, sl, f_nextLevel(gxDLv, m, gaLvl, rk), "limit", f_edge(sGA.totR, sGA.n), f_rec(sGA), "Price broke GEX " + f_px(gaLvl) + " with the anchored VWAP holding. " + (m == -1 ? "Sell" : "Buy") + " a retest that holds. Off on a close back through the AVWAP, " + f_px(gaAvNow), false)
 
     Plan bestL = f_pick(longs)
     Plan bestS = f_pick(shorts)
