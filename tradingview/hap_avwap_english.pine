@@ -1,0 +1,690 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © agahakanaga
+//
+// English translation of "HaP AVWAP / Anchored VWAP" by agahakanaga, made for
+// A.W. Strategy. The logic and the defaults are the original's; every setting,
+// label, tooltip and alert is in English, and the info panel (a table) starts off.
+// Still under the Mozilla Public License 2.0.
+
+//@version=6
+indicator("HaP AVWAP / Anchored VWAP (English)", shorttitle = "HaP AVWAP", overlay = true, max_labels_count = 200, max_polylines_count = 50)
+
+// ============================================================================
+// Constants
+// ============================================================================
+const int BUF_SIZE    = 4000
+const int MAX_PIVOTS  = 85
+const int MAX_CANDS   = 12
+const int MAX_SIGNALS = 50
+const int SIG_MIN_AGE = 3
+
+const string SRC_EXT = "Top=High, Bottom=Low"
+const string SRC_STD = "Common source"
+
+const string MODE_SCORE    = "Importance score"
+const string MODE_UNBROKEN = "Unbroken pivot"
+const string MODE_PERIOD   = "Period high-low"
+const string MODE_LAST     = "Last pivot"
+
+const string BRK_CLOSE = "Close"
+const string BRK_WICK  = "Wick"
+
+const string BAND_SD  = "Std dev"
+const string BAND_PCT = "Percent"
+
+const string POS_TR = "Top right"
+const string POS_BR = "Bottom right"
+const string POS_TL = "Top left"
+const string POS_BL = "Bottom left"
+
+const string G_GEN = "General"
+const string G_PIV = "High-low selection"
+const string G_TOP = "Top AVWAP"
+const string G_BOT = "Bottom AVWAP"
+
+// ============================================================================
+// Inputs
+// ============================================================================
+srcModeInput = input.string(SRC_EXT, "Price source", options = [SRC_EXT, SRC_STD], group = G_GEN,
+     tooltip = "The Top AVWAP is calculated from the High and the Bottom AVWAP from the Low. Optionally use one common source for both.")
+srcInput   = input.source(hlc3, "Common source", group = G_GEN)
+twapInput  = input.bool(true, "TWAP on no-volume symbols", group = G_GEN,
+     tooltip = "On symbols with zero volume each bar is weighted as 1.")
+anchorLabelsInput = input.bool(true, "Anchor labels", group = G_GEN)
+signalsInput = input.bool(true, "S / R marks", group = G_GEN,
+     tooltip = "S (Support): price dips to the Bottom AVWAP and closes above it with a bullish candle.\nR (Rejection): price reaches the Top AVWAP and closes below it with a bearish candle.\nMarks are shown on closed bars after the current anchor.")
+cloudInput    = input.bool(true, "Value cloud", group = G_GEN,
+     tooltip = "Fills the area between the Top and Bottom AVWAP.")
+panelInput    = input.bool(false, "Info panel (a table)", inline = "panel", group = G_GEN)
+panelPosInput = input.string(POS_BR, "", options = [POS_TR, POS_BR, POS_TL, POS_BL], inline = "panel", group = G_GEN)
+
+modeInput = input.string(MODE_SCORE, "Selection method", options = [MODE_SCORE, MODE_UNBROKEN, MODE_PERIOD, MODE_LAST], group = G_PIV,
+     tooltip = "Importance score: ranks by reversal size, prior move, volume, wick, structural position, break status and recency.\nUnbroken pivot: the most extreme pivot not yet crossed by price.\nPeriod high-low: highest and lowest bar in the window.\nLast pivot: the most recent pivot that passes the prominence threshold.\nMin. prominence applies to all modes except period high-low.")
+pivLeftInput  = input.int(10, "Pivot left", minval = 2, maxval = 60, inline = "piv", group = G_PIV)
+pivRightInput = input.int(5, "Right", minval = 1, maxval = 40, inline = "piv", group = G_PIV,
+     tooltip = "A pivot is confirmed after 'Right' bars; the anchor is placed on the pivot bar itself.")
+lookbackInput = input.int(500, "Lookback", minval = 50, maxval = 3900, group = G_PIV)
+minPromInput  = input.float(2.0, "Min. prominence (ATR)", minval = 0.0, step = 0.25, group = G_PIV,
+     tooltip = "Price must move at least this many ATRs away from the pivot.")
+breakSrcInput = input.string(BRK_CLOSE, "Break", options = [BRK_CLOSE, BRK_WICK], inline = "brk", group = G_PIV)
+breakPenInput = input.float(0.25, "Penalty", minval = 0.0, maxval = 1.0, step = 0.05, inline = "brk", group = G_PIV,
+     tooltip = "Score multiplier for broken pivots. 0 excludes broken pivots.")
+volWInput  = input.float(0.35, "Volume", minval = 0.0, maxval = 1.5, step = 0.05, inline = "w1", group = G_PIV)
+wickWInput = input.float(0.25, "Wick", minval = 0.0, maxval = 1.0, step = 0.05, inline = "w1", group = G_PIV,
+     tooltip = "Volume and wick rejection weights.")
+domWInput  = input.float(0.40, "Structural", minval = 0.0, maxval = 1.5, step = 0.05, inline = "w2", group = G_PIV)
+recWInput  = input.float(0.80, "Recency", minval = 0.0, maxval = 5.0, step = 0.2, inline = "w2", group = G_PIV,
+     tooltip = "Structural: favours pivots near the period high or low.\nRecency: higher values favour recent pivots.")
+shadowInput = input.bool(true, "Second anchor", group = G_PIV,
+     tooltip = "In importance score mode, draws the AVWAP of the second-best high and low as dashed lines.")
+candInput = input.bool(true, "Other candidates", group = G_PIV)
+
+topOn       = input.bool(true, "On", inline = "t0", group = G_TOP)
+topColor    = input.color(#F23645, "", inline = "t0", group = G_TOP)
+topWidth    = input.int(2, "Width", minval = 1, maxval = 4, inline = "t0", group = G_TOP)
+topBands    = input.bool(true, "Bands", inline = "t1", group = G_TOP)
+topBandType = input.string(BAND_SD, "", options = [BAND_SD, BAND_PCT], inline = "t1", group = G_TOP)
+topB1On     = input.bool(true, "", inline = "t2", group = G_TOP)
+topB1       = input.float(1.0, "Band 1", step = 0.1, inline = "t2", group = G_TOP)
+topB2On     = input.bool(true, "", inline = "t3", group = G_TOP)
+topB2       = input.float(2.0, "Band 2", step = 0.1, inline = "t3", group = G_TOP)
+topB3On     = input.bool(false, "", inline = "t4", group = G_TOP)
+topB3       = input.float(3.0, "Band 3", step = 0.1, inline = "t4", group = G_TOP)
+topFill     = input.bool(true, "Band 1 fill", group = G_TOP)
+
+botOn       = input.bool(true, "On", inline = "d0", group = G_BOT)
+botColor    = input.color(#089981, "", inline = "d0", group = G_BOT)
+botWidth    = input.int(2, "Width", minval = 1, maxval = 4, inline = "d0", group = G_BOT)
+botBands    = input.bool(true, "Bands", inline = "d1", group = G_BOT)
+botBandType = input.string(BAND_SD, "", options = [BAND_SD, BAND_PCT], inline = "d1", group = G_BOT)
+botB1On     = input.bool(true, "", inline = "d2", group = G_BOT)
+botB1       = input.float(1.0, "Band 1", step = 0.1, inline = "d2", group = G_BOT)
+botB2On     = input.bool(true, "", inline = "d3", group = G_BOT)
+botB2       = input.float(2.0, "Band 2", step = 0.1, inline = "d3", group = G_BOT)
+botB3On     = input.bool(false, "", inline = "d4", group = G_BOT)
+botB3       = input.float(3.0, "Band 3", step = 0.1, inline = "d4", group = G_BOT)
+botFill     = input.bool(true, "Band 1 fill", group = G_BOT)
+
+// ============================================================================
+// Cumulative sums and ring buffers
+// ============================================================================
+float rawVol = na(volume) ? 0.0 : volume
+float vol    = twapInput and rawVol == 0 ? 1.0 : rawVol
+
+bool  extremeSrc = srcModeInput == SRC_EXT
+float srcTop     = extremeSrc ? high : nz(srcInput, close)
+float srcBot     = extremeSrc ? low  : nz(srcInput, close)
+
+var float cumV      = 0.0
+var float cumPVTop  = 0.0
+var float cumP2VTop = 0.0
+var float cumPVBot  = 0.0
+var float cumP2VBot = 0.0
+
+var array<float> bufV      = array.new<float>(BUF_SIZE, 0.0)
+var array<float> bufPVTop  = array.new<float>(BUF_SIZE, 0.0)
+var array<float> bufP2VTop = array.new<float>(BUF_SIZE, 0.0)
+var array<float> bufPVBot  = array.new<float>(BUF_SIZE, 0.0)
+var array<float> bufP2VBot = array.new<float>(BUF_SIZE, 0.0)
+var array<float> bufO      = array.new<float>(BUF_SIZE, na)
+var array<float> bufH      = array.new<float>(BUF_SIZE, na)
+var array<float> bufL      = array.new<float>(BUF_SIZE, na)
+var array<float> bufC      = array.new<float>(BUF_SIZE, na)
+
+cumV      += vol
+cumPVTop  += srcTop * vol
+cumP2VTop += srcTop * srcTop * vol
+cumPVBot  += srcBot * vol
+cumP2VBot += srcBot * srcBot * vol
+
+int slot = bar_index % BUF_SIZE
+bufV.set(slot, cumV)
+bufPVTop.set(slot, cumPVTop)
+bufP2VTop.set(slot, cumP2VTop)
+bufPVBot.set(slot, cumPVBot)
+bufP2VBot.set(slot, cumP2VBot)
+bufO.set(slot, open)
+bufH.set(slot, high)
+bufL.set(slot, low)
+bufC.set(slot, close)
+
+// Anchored VWAP and standard deviation at bar j for an anchor bar
+anchorStats(int anchor, int j, bool isTop) =>
+    float vwap = na
+    float dev  = na
+    if not na(anchor) and anchor <= j and bar_index - anchor < BUF_SIZE - 1
+        int   prev = anchor > 0 ? (anchor - 1) % BUF_SIZE : 0
+        float v0   = anchor > 0 ? bufV.get(prev) : 0.0
+        float p0   = anchor > 0 ? (isTop ? bufPVTop.get(prev)  : bufPVBot.get(prev))  : 0.0
+        float q0   = anchor > 0 ? (isTop ? bufP2VTop.get(prev) : bufP2VBot.get(prev)) : 0.0
+        int   cur  = j % BUF_SIZE
+        float dV   = bufV.get(cur) - v0
+        if dV > 0
+            float dPV  = (isTop ? bufPVTop.get(cur)  : bufPVBot.get(cur))  - p0
+            float dP2V = (isTop ? bufP2VTop.get(cur) : bufP2VBot.get(cur)) - q0
+            vwap := dPV / dV
+            dev  := math.sqrt(math.max(dP2V / dV - vwap * vwap, 0.0))
+    [vwap, dev]
+
+bandOffset(float vwap, float dev, string bandType, float mult) =>
+    bandType == BAND_SD ? dev * mult : vwap * mult / 100.0
+
+// ============================================================================
+// Pivot detection
+// ============================================================================
+type Pivot
+    float price
+    int   bar
+    float atr
+    float relVol
+    float leftMove
+    float extreme
+    float wick
+    bool  broken
+
+var array<Pivot> highPivots = array.new<Pivot>()
+var array<Pivot> lowPivots  = array.new<Pivot>()
+
+int   pR      = pivRightInput
+int   leftWin = pivLeftInput * 5
+float atr14   = ta.atr(14)
+float avgVol  = ta.sma(vol, 50)
+
+// Volume around the pivot bar, relative to the average before the pivot
+float vPiv    = nz(vol[pR])
+float vPrev   = nz(vol[pR + 1])
+float vNext   = nz(vol[math.max(0, pR - 1)])
+float coreVol = (vPiv * 1.5 + vPrev + vNext) / 3.5
+float peakVol = math.max(vPiv, math.max(vPrev, vNext))
+float baseVol = nz(avgVol[pR + 1])
+float relVol  = baseVol > 0 ? 0.6 * coreVol / baseVol + 0.4 * peakVol / baseVol : 1.0
+
+float ph         = ta.pivothigh(high, pivLeftInput, pR)
+float pl         = ta.pivotlow(low, pivLeftInput, pR)
+float leftLow    = ta.lowest(low, leftWin)[pR]
+float leftHigh   = ta.highest(high, leftWin)[pR]
+float rightLow   = ta.lowest(low, pR)
+float rightHigh  = ta.highest(high, pR)
+float rightClHi  = ta.highest(close, pR)
+float rightClLo  = ta.lowest(close, pR)
+float pivAtr     = atr14[pR]
+
+float pivRange  = math.max(high[pR] - low[pR], syminfo.mintick)
+float upperWick = (high[pR] - math.max(open[pR], close[pR])) / pivRange
+float lowerWick = (math.min(open[pR], close[pR]) - low[pR]) / pivRange
+
+bool  breakOnClose = breakSrcInput == BRK_CLOSE
+float breakHigh    = breakOnClose ? close : high
+float breakLow     = breakOnClose ? close : low
+
+// Update existing pivots
+for pv in highPivots
+    if not pv.broken
+        pv.extreme := math.min(pv.extreme, low)
+        if breakHigh > pv.price
+            pv.broken := true
+
+for pv in lowPivots
+    if not pv.broken
+        pv.extreme := math.max(pv.extreme, high)
+        if breakLow < pv.price
+            pv.broken := true
+
+// Add newly confirmed pivots
+if not na(ph) and not na(pivAtr) and pivAtr > 0
+    highPivots.push(Pivot.new(
+         price    = ph,
+         bar      = bar_index - pR,
+         atr      = pivAtr,
+         relVol   = relVol,
+         leftMove = math.max(ph - nz(leftLow, ph), 0.0),
+         extreme  = math.min(nz(rightLow, ph), low),
+         wick     = upperWick,
+         broken   = (breakOnClose ? rightClHi : rightHigh) > ph))
+
+if not na(pl) and not na(pivAtr) and pivAtr > 0
+    lowPivots.push(Pivot.new(
+         price    = pl,
+         bar      = bar_index - pR,
+         atr      = pivAtr,
+         relVol   = relVol,
+         leftMove = math.max(nz(leftHigh, pl) - pl, 0.0),
+         extreme  = math.max(nz(rightHigh, pl), high),
+         wick     = lowerWick,
+         broken   = (breakOnClose ? rightClLo : rightLow) < pl))
+
+// Remove old pivots
+int maxAge = math.min(lookbackInput, BUF_SIZE - 2)
+while highPivots.size() > 0 and (bar_index - highPivots.first().bar > maxAge or highPivots.size() > MAX_PIVOTS)
+    highPivots.shift()
+while lowPivots.size() > 0 and (bar_index - lowPivots.first().bar > maxAge or lowPivots.size() > MAX_PIVOTS)
+    lowPivots.shift()
+
+// ============================================================================
+// Scoring and anchor selection
+// ============================================================================
+int   effLook    = math.min(lookbackInput, bar_index + 1)
+int   hiOffset   = ta.highestbars(high, effLook)
+int   loOffset   = ta.lowestbars(low, effLook)
+int   perHiBar   = na(hiOffset) ? na : bar_index + hiOffset
+int   perLoBar   = na(loOffset) ? na : bar_index + loOffset
+float perHiPrice = ta.highest(high, effLook)
+float perLoPrice = ta.lowest(low, effLook)
+float perRange   = math.max(perHiPrice - perLoPrice, nz(atr14, 1.0))
+
+rightMove(Pivot pv, bool isHigh) =>
+    (isHigh ? pv.price - pv.extreme : pv.extreme - pv.price) / pv.atr
+
+pivotScore(Pivot pv, bool isHigh) =>
+    float rgt   = rightMove(pv, isHigh)
+    float lft   = pv.leftMove / pv.atr
+    float prom  = 0.65 * rgt + 0.35 * math.min(lft, rgt * 2.5)
+    float volF  = math.max(0.25, 1.0 + volWInput * (math.min(pv.relVol, 4.0) - 1.0))
+    float wickF = 1.0 + wickWInput * pv.wick
+    float dom   = isHigh ? (pv.price - perLoPrice) / perRange : (perHiPrice - pv.price) / perRange
+    float domF  = 1.0 + domWInput * math.pow(math.max(0.0, math.min(1.0, dom)), 2)
+    float recF  = 1.0 / (1.0 + recWInput * float(bar_index - pv.bar) / lookbackInput)
+    float brkF  = pv.broken ? breakPenInput : 1.0
+    [rgt, prom, prom * volF * wickF * domF * recF * brkF]
+
+pickBestTwo(array<Pivot> pivots, bool isHigh) =>
+    int   best1  = -1
+    int   best2  = -1
+    float score1 = 0.0
+    float score2 = 0.0
+    float prom1  = na
+    for [i, pv] in pivots
+        [rgt, prom, sc] = pivotScore(pv, isHigh)
+        if rgt >= minPromInput and sc > 0
+            if sc > score1
+                best2  := best1
+                score2 := score1
+                best1  := i
+                score1 := sc
+                prom1  := prom
+            else if sc > score2
+                best2  := i
+                score2 := sc
+    [best1, score1, prom1, best2]
+
+pickUnbroken(array<Pivot> pivots, bool isHigh) =>
+    int   best    = -1
+    float extreme = na
+    for [i, pv] in pivots
+        if not pv.broken and rightMove(pv, isHigh) >= minPromInput
+            if na(extreme) or (isHigh ? pv.price > extreme : pv.price < extreme)
+                extreme := pv.price
+                best    := i
+    best
+
+pickLast(array<Pivot> pivots, bool isHigh) =>
+    int best = -1
+    int n    = pivots.size()
+    if n > 0
+        for i = n - 1 to 0
+            if rightMove(pivots.get(i), isHigh) >= minPromInput
+                best := i
+                break
+    best
+
+selectAnchor(array<Pivot> pivots, bool isHigh, int perBar, float perPrice) =>
+    int    anchor  = na
+    float  price   = na
+    float  prom    = na
+    float  rv      = na
+    float  score   = na
+    bool   broken  = false
+    string source  = ""
+    int    anchor2 = na
+    float  price2  = na
+    if modeInput == MODE_SCORE
+        [i1, s1, p1, i2] = pickBestTwo(pivots, isHigh)
+        if i1 >= 0
+            Pivot pv = pivots.get(i1)
+            anchor := pv.bar
+            price  := pv.price
+            prom   := p1
+            rv     := pv.relVol
+            score  := s1
+            broken := pv.broken
+            source := "Importance score"
+            if i2 >= 0
+                Pivot pv2 = pivots.get(i2)
+                anchor2 := pv2.bar
+                price2  := pv2.price
+    else if modeInput == MODE_UNBROKEN or modeInput == MODE_LAST
+        int idx = modeInput == MODE_UNBROKEN ? pickUnbroken(pivots, isHigh) : pickLast(pivots, isHigh)
+        if idx >= 0
+            Pivot pv = pivots.get(idx)
+            [rgt, _, sc] = pivotScore(pv, isHigh)
+            anchor := pv.bar
+            price  := pv.price
+            prom   := rgt
+            rv     := pv.relVol
+            score  := sc
+            broken := pv.broken
+            source := modeInput == MODE_UNBROKEN ? "Unbroken pivot" : "Last pivot"
+    if na(anchor)
+        anchor := perBar
+        price  := perPrice
+        string perName = isHigh ? "Period high" : "Period low"
+        source := modeInput == MODE_PERIOD ? perName : perName + " (fallback)"
+    [anchor, price, prom, rv, score, broken, source, anchor2, price2]
+
+[topAnc, topPx, topProm, topRv, topScore, topBroken, topSrc, topAnc2, topPx2] = selectAnchor(highPivots, true,  perHiBar, perHiPrice)
+[botAnc, botPx, botProm, botRv, botScore, botBroken, botSrc, botAnc2, botPx2] = selectAnchor(lowPivots,  false, perLoBar, perLoPrice)
+
+bool showTop  = topOn and not na(topAnc)
+bool showBot  = botOn and not na(botAnc)
+bool showTop2 = showTop and shadowInput and not na(topAnc2)
+bool showBot2 = showBot and shadowInput and not na(botAnc2)
+
+[topVw, topDev] = anchorStats(topAnc,  bar_index, true)
+[botVw, botDev] = anchorStats(botAnc,  bar_index, false)
+[topVw2, _]     = anchorStats(topAnc2, bar_index, true)
+[botVw2, _]     = anchorStats(botAnc2, bar_index, false)
+
+float topVwap  = showTop  ? topVw  : na
+float botVwap  = showBot  ? botVw  : na
+float topVwap2 = showTop2 ? topVw2 : na
+float botVwap2 = showBot2 ? botVw2 : na
+
+// ============================================================================
+// Drawing
+// ============================================================================
+var array<polyline> polys  = array.new<polyline>()
+var array<label>    labels = array.new<label>()
+
+drawPoly(array<chart.point> pts, color col, string style, int width) =>
+    if pts.size() > 1
+        polys.push(polyline.new(pts, line_color = col, line_style = style, line_width = width))
+
+drawArea(array<chart.point> upper, array<chart.point> lower, color fillCol) =>
+    if upper.size() > 1 and lower.size() > 1
+        array<chart.point> area = upper.copy()
+        for k = lower.size() - 1 to 0
+            area.push(lower.get(k))
+        polys.push(polyline.new(area, closed = true, line_color = color.new(fillCol, 100), fill_color = fillCol))
+
+drawMain(int anchor, bool isTop, color col, int width, bool bandsOn, string bandType, bool b1On, float m1, bool b2On, float m2, bool b3On, float m3, bool fillOn) =>
+    array<chart.point> mid = array.new<chart.point>()
+    array<chart.point> up1 = array.new<chart.point>()
+    array<chart.point> dn1 = array.new<chart.point>()
+    array<chart.point> up2 = array.new<chart.point>()
+    array<chart.point> dn2 = array.new<chart.point>()
+    array<chart.point> up3 = array.new<chart.point>()
+    array<chart.point> dn3 = array.new<chart.point>()
+    bool need1 = b1On or fillOn
+    for j = anchor to bar_index
+        [w, d] = anchorStats(anchor, j, isTop)
+        if not na(w)
+            mid.push(chart.point.from_index(j, w))
+            if bandsOn and not na(d)
+                if need1
+                    float e1 = bandOffset(w, d, bandType, m1)
+                    up1.push(chart.point.from_index(j, w + e1))
+                    dn1.push(chart.point.from_index(j, w - e1))
+                if b2On
+                    float e2 = bandOffset(w, d, bandType, m2)
+                    up2.push(chart.point.from_index(j, w + e2))
+                    dn2.push(chart.point.from_index(j, w - e2))
+                if b3On
+                    float e3 = bandOffset(w, d, bandType, m3)
+                    up3.push(chart.point.from_index(j, w + e3))
+                    dn3.push(chart.point.from_index(j, w - e3))
+    if fillOn
+        drawArea(up1, dn1, color.new(col, 92))
+    drawPoly(up3, color.new(col, 62), line.style_dotted, 1)
+    drawPoly(dn3, color.new(col, 62), line.style_dotted, 1)
+    drawPoly(up2, color.new(col, 45), line.style_dashed, 1)
+    drawPoly(dn2, color.new(col, 45), line.style_dashed, 1)
+    if b1On
+        drawPoly(up1, color.new(col, 28), line.style_solid, 1)
+        drawPoly(dn1, color.new(col, 28), line.style_solid, 1)
+    drawPoly(mid, col, line.style_solid, width)
+
+drawSecond(int anchor, float price, bool isTop, color col) =>
+    array<chart.point> pts = array.new<chart.point>()
+    for j = anchor to bar_index
+        [w, _] = anchorStats(anchor, j, isTop)
+        if not na(w)
+            pts.push(chart.point.from_index(j, w))
+    drawPoly(pts, color.new(col, 35), line.style_dashed, 1)
+    if anchorLabelsInput
+        string txt = isTop ? "2nd Top" : "2nd Bottom"
+        string tip = "Second highest-scored anchor" + "\n" + "Age: " + str.tostring(bar_index - anchor) + " bar"
+        labels.push(label.new(anchor, price, txt, style = isTop ? label.style_label_down : label.style_label_up,
+             color = color.new(col, 55), textcolor = color.white, size = size.tiny, tooltip = tip))
+
+drawCloud(int topAnchor, int botAnchor) =>
+    int start = math.max(topAnchor, botAnchor)
+    if bar_index > start
+        array<chart.point> upper = array.new<chart.point>()
+        array<chart.point> lower = array.new<chart.point>()
+        for j = start to bar_index
+            [wT, _] = anchorStats(topAnchor, j, true)
+            [wB, _] = anchorStats(botAnchor, j, false)
+            if not na(wT) and not na(wB)
+                upper.push(chart.point.from_index(j, wT))
+                lower.push(chart.point.from_index(j, wB))
+        drawArea(upper, lower, color.new(#787B86, 93))
+
+promText(float prom, string fallback) =>
+    na(prom) ? fallback : str.tostring(prom, "#.#") + " ATR"
+
+drawAnchorLabel(int anchor, float price, bool isTop, float prom, float rv, float score, string source, bool broken, color col) =>
+    string txt = (isTop ? "TOP" : "BOTTOM") + " | " + promText(prom, source) + (broken ? " | broken" : "")
+    string tip = "Anchor: " + source +
+         "\n" + "Price: " + str.tostring(price, format.mintick) +
+         "\n" + "Prominence: " + promText(prom, "-") +
+         "\n" + "Relative volume: " + (na(rv) ? "-" : str.tostring(rv, "#.##") + "x") +
+         "\n" + "Score: " + (na(score) ? "-" : str.tostring(score, "#.##")) +
+         "\n" + "Age: " + str.tostring(bar_index - anchor) + " bar"
+    labels.push(label.new(anchor, price, txt, style = isTop ? label.style_label_down : label.style_label_up,
+         color = color.new(col, 15), textcolor = color.white, size = size.small, tooltip = tip))
+
+drawCandidates(array<Pivot> pivots, bool isHigh, int skip1, int skip2, color col) =>
+    int n     = pivots.size()
+    int count = 0
+    if n > 0
+        for i = n - 1 to 0
+            if count >= MAX_CANDS
+                break
+            Pivot pv = pivots.get(i)
+            [rgt, prom, sc] = pivotScore(pv, isHigh)
+            if rgt >= minPromInput and pv.bar != skip1 and pv.bar != skip2
+                count += 1
+                string tip = (isHigh ? "Candidate high" : "Candidate low") +
+                     "\n" + "Prominence: " + str.tostring(prom, "#.#") + " ATR" +
+                     "\n" + "Relative volume: " + str.tostring(pv.relVol, "#.##") + "x" +
+                     "\n" + "Wick: %" + str.tostring(pv.wick * 100, "#") +
+                     "\n" + "Score: " + str.tostring(sc, "#.##") +
+                     (pv.broken ? "\n" + "Broken" : "")
+                labels.push(label.new(pv.bar, pv.price, "", style = label.style_diamond,
+                     color = color.new(col, pv.broken ? 70 : 30), size = size.tiny, tooltip = tip))
+
+// S / R marks on closed bars after the current anchor, measured against the current line
+drawSignals(int anchor, bool isTop, color col) =>
+    int lastBar = barstate.isconfirmed ? bar_index : bar_index - 1
+    int count   = 0
+    if lastBar - anchor > SIG_MIN_AGE
+        for j = lastBar to anchor + SIG_MIN_AGE + 1
+            if count >= MAX_SIGNALS
+                break
+            [w, _] = anchorStats(anchor, j, isTop)
+            if not na(w)
+                int   k  = j % BUF_SIZE
+                float o  = bufO.get(k)
+                float h  = bufH.get(k)
+                float l  = bufL.get(k)
+                float c  = bufC.get(k)
+                bool hit = isTop ? (h >= w and c < w and c < o) : (l <= w and c > w and c > o)
+                if hit
+                    count += 1
+                    labels.push(label.new(j, isTop ? h : l, isTop ? "R" : "S",
+                         yloc      = isTop ? yloc.abovebar : yloc.belowbar,
+                         style     = isTop ? label.style_triangledown : label.style_triangleup,
+                         color     = col,
+                         textcolor = col,
+                         size      = size.tiny,
+                         tooltip   = isTop ? "Rejection: Top AVWAP tested, closed below" : "Support: Bottom AVWAP tested, closed above"))
+
+if barstate.islast
+    while polys.size() > 0
+        polys.pop().delete()
+    while labels.size() > 0
+        labels.pop().delete()
+
+    if cloudInput and showTop and showBot
+        drawCloud(topAnc, botAnc)
+    if showBot2
+        drawSecond(botAnc2, botPx2, false, botColor)
+    if showTop2
+        drawSecond(topAnc2, topPx2, true, topColor)
+    if showBot
+        drawMain(botAnc, false, botColor, botWidth, botBands, botBandType, botB1On, botB1, botB2On, botB2, botB3On, botB3, botFill)
+        if anchorLabelsInput
+            drawAnchorLabel(botAnc, botPx, false, botProm, botRv, botScore, botSrc, botBroken, botColor)
+        if signalsInput
+            drawSignals(botAnc, false, botColor)
+    if showTop
+        drawMain(topAnc, true, topColor, topWidth, topBands, topBandType, topB1On, topB1, topB2On, topB2, topB3On, topB3, topFill)
+        if anchorLabelsInput
+            drawAnchorLabel(topAnc, topPx, true, topProm, topRv, topScore, topSrc, topBroken, topColor)
+        if signalsInput
+            drawSignals(topAnc, true, topColor)
+    if candInput
+        if topOn
+            drawCandidates(highPivots, true, nz(topAnc, -1), nz(topAnc2, -1), topColor)
+        if botOn
+            drawCandidates(lowPivots, false, nz(botAnc, -1), nz(botAnc2, -1), botColor)
+
+// ============================================================================
+// Info panel
+// ============================================================================
+pctText(float w) =>
+    na(w) ? "-" : (close >= w ? "+" : "") + str.tostring((close - w) / w * 100.0, "#.##") + "%"
+
+zText(float w, float d) =>
+    na(w) or na(d) or d == 0 ? "-" : (close >= w ? "+" : "") + str.tostring((close - w) / d, "#.##") + "σ"
+
+panelPos = switch panelPosInput
+    POS_TR => position.top_right
+    POS_TL => position.top_left
+    POS_BL => position.bottom_left
+    => position.bottom_right
+
+var table infoTable = panelInput ? table.new(panelPos, 7, 4, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60)) : na
+if barstate.isfirst and panelInput
+    infoTable.merge_cells(0, 3, 6, 3)
+
+cell(int col, int row, string txt, color bg, color fg) =>
+    infoTable.cell(col, row, txt, bgcolor = bg, text_color = fg, text_size = size.tiny)
+
+if panelInput and barstate.islast
+    color headBg = color.new(#1E222D, 15)
+    color rowBg  = color.new(#131722, 20)
+    string perTxt = "Period"
+
+    cell(0, 0, "ANCHOR", headBg, color.silver)
+    cell(1, 0, "AVWAP", headBg, color.silver)
+    cell(2, 0, "DIFF", headBg, color.silver)
+    cell(3, 0, "Z-SCORE", headBg, color.silver)
+    cell(4, 0, "PROM.", headBg, color.silver)
+    cell(5, 0, "VOLUME", headBg, color.silver)
+    cell(6, 0, "AGE", headBg, color.silver)
+
+    cell(0, 1, "Top" + (topBroken ? " (broken)" : ""), rowBg, topColor)
+    cell(1, 1, na(topVwap) ? "-" : str.tostring(topVwap, format.mintick), rowBg, topColor)
+    cell(2, 1, pctText(topVwap), rowBg, topColor)
+    cell(3, 1, zText(topVwap, topDev), rowBg, topColor)
+    cell(4, 1, showTop ? promText(topProm, perTxt) : "-", rowBg, topColor)
+    cell(5, 1, showTop and not na(topRv) ? str.tostring(topRv, "#.#") + "x" : "-", rowBg, topColor)
+    cell(6, 1, showTop ? str.tostring(bar_index - topAnc) + "b" : "-", rowBg, color.silver)
+
+    cell(0, 2, "Bottom" + (botBroken ? " (broken)" : ""), rowBg, botColor)
+    cell(1, 2, na(botVwap) ? "-" : str.tostring(botVwap, format.mintick), rowBg, botColor)
+    cell(2, 2, pctText(botVwap), rowBg, botColor)
+    cell(3, 2, zText(botVwap, botDev), rowBg, botColor)
+    cell(4, 2, showBot ? promText(botProm, perTxt) : "-", rowBg, botColor)
+    cell(5, 2, showBot and not na(botRv) ? str.tostring(botRv, "#.#") + "x" : "-", rowBg, botColor)
+    cell(6, 2, showBot ? str.tostring(bar_index - botAnc) + "b" : "-", rowBg, color.silver)
+
+    string regime    = "Waiting for data"
+    color  regimeCol = color.silver
+    if not na(topVwap) and not na(botVwap)
+        float  spreadPct = math.abs(topVwap - botVwap) / close * 100.0
+        bool   squeeze   = spreadPct < nz(atr14) / close * 100.0 * 1.2
+        string spreadTxt = squeeze ? " | Squeeze" : " | Spread %" + str.tostring(spreadPct, "#.##")
+        if close > topVwap and close > botVwap
+            regime    := "Bullish: price above both AVWAPs" + spreadTxt
+            regimeCol := #089981
+        else if close < topVwap and close < botVwap
+            regime    := "Bearish: price below both AVWAPs" + spreadTxt
+            regimeCol := #F23645
+        else if close >= botVwap and close <= topVwap
+            regime    := "Balance: price between the AVWAPs" + spreadTxt
+            regimeCol := #FFCA28
+        else
+            regime    := "Transition: AVWAPs have crossed" + spreadTxt
+            regimeCol := #FF9800
+    cell(0, 3, regime, headBg, regimeCol)
+
+// ============================================================================
+// Data window
+// ============================================================================
+plot(topVwap,  "Top AVWAP",          color = topColor, display = display.data_window)
+plot(botVwap,  "Bottom AVWAP",        color = botColor, display = display.data_window)
+plot(topVwap2, "2nd Top AVWAP",   color = color.new(topColor, 40), display = display.data_window)
+plot(botVwap2, "2nd Bottom AVWAP", color = color.new(botColor, 40), display = display.data_window)
+
+// ============================================================================
+// Alerts (evaluated on closed bars only)
+// ============================================================================
+bool topSame = not na(topAnc) and topAnc == nz(topAnc[1], -1)
+bool botSame = not na(botAnc) and botAnc == nz(botAnc[1], -1)
+bool closed  = barstate.isconfirmed
+
+bool supportHit = signalsInput and showBot and botSame and not na(botVwap) and bar_index - botAnc > SIG_MIN_AGE and low <= botVwap and close > botVwap and close > open
+bool rejectHit  = signalsInput and showTop and topSame and not na(topVwap) and bar_index - topAnc > SIG_MIN_AGE and high >= topVwap and close < topVwap and close < open
+
+bool topB2Ok = showTop and topBands and topB2On and not na(topVwap)
+bool botB2Ok = showBot and botBands and botB2On and not na(botVwap)
+float topUp2 = topB2Ok ? topVwap + bandOffset(topVwap, topDev, topBandType, topB2) : na
+float topDn2 = topB2Ok ? topVwap - bandOffset(topVwap, topDev, topBandType, topB2) : na
+float botUp2 = botB2Ok ? botVwap + bandOffset(botVwap, botDev, botBandType, botB2) : na
+float botDn2 = botB2Ok ? botVwap - bandOffset(botVwap, botDev, botBandType, botB2) : na
+
+bool crossTopUp  = ta.crossover(close, topVwap)
+bool crossTopDn  = ta.crossunder(close, topVwap)
+bool crossBotUp  = ta.crossover(close, botVwap)
+bool crossBotDn  = ta.crossunder(close, botVwap)
+bool crossTopUp2 = ta.crossunder(close, topUp2)
+bool crossTopDn2 = ta.crossover(close, topDn2)
+bool crossBotUp2 = ta.crossunder(close, botUp2)
+bool crossBotDn2 = ta.crossover(close, botDn2)
+
+alertcondition(closed and showTop and topSame and crossTopUp, "Top AVWAP crossed up",
+     "Price crossed above the Top AVWAP")
+alertcondition(closed and showTop and topSame and crossTopDn, "Top AVWAP crossed down",
+     "Price crossed below the Top AVWAP")
+alertcondition(closed and showBot and botSame and crossBotUp, "Bottom AVWAP crossed up",
+     "Price crossed above the Bottom AVWAP")
+alertcondition(closed and showBot and botSame and crossBotDn, "Bottom AVWAP crossed down",
+     "Price crossed below the Bottom AVWAP")
+alertcondition(closed and supportHit, "S: Bottom AVWAP support",
+     "S: Price tested the Bottom AVWAP and closed above it")
+alertcondition(closed and rejectHit, "R: Top AVWAP rejection",
+     "R: Price tested the Top AVWAP and closed below it")
+alertcondition(closed and topSame and crossTopUp2, "Top +2 band pullback",
+     "Price fell back below the Top AVWAP +2 band")
+alertcondition(closed and topSame and crossTopDn2, "Top -2 band bounce",
+     "Price moved back above the Top AVWAP -2 band")
+alertcondition(closed and botSame and crossBotUp2, "Bottom +2 band pullback",
+     "Price fell back below the Bottom AVWAP +2 band")
+alertcondition(closed and botSame and crossBotDn2, "Bottom -2 band bounce",
+     "Price moved back above the Bottom AVWAP -2 band")
+alertcondition(closed and showTop and not topSame and not na(topAnc[1]), "New top anchor",
+     "Top anchor moved to a new pivot")
+alertcondition(closed and showBot and not botSame and not na(botAnc[1]), "New bottom anchor",
+     "Bottom anchor moved to a new pivot")
