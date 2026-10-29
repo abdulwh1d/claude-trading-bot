@@ -1,4 +1,4 @@
-"""GEX levels for the TradingView dashboard.
+"""GEX levels for A.W. Strategy on TradingView.
 
 Pulls CBOE's free delayed option chains and computes dealer gamma exposure (GEX) by
 strike, the gamma flip, the call wall, the put wall and a ladder of every strike near spot for:

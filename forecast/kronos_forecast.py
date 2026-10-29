@@ -1,10 +1,10 @@
-"""Kronos forecasts for the TradingView dashboard.
+"""Kronos forecasts for A.W. Strategy on TradingView.
 
 Kronos (shiyu-coder/Kronos, MIT) is an open-source foundation model trained on candlestick
 charts from 45 exchanges. Each run pulls the last few days of 5-minute bars for NQ, ES, RTY,
 YM and gold from Yahoo Finance, asks Kronos-small for the next 2 hours (24 bars, 5 sampled
 paths averaged) from the last 400 bars, and adds one line per market to gex/latest.txt and
-gex/history.txt, the file the dashboard already reads:
+gex/history.txt, the file the strategy already reads:
 
     2026-10-26T13:38 FC:NQ last=29495.25 c1h=29520.50 c2h=29540.00 hi=29580.00 lo=29460.00 hit=11/20
 

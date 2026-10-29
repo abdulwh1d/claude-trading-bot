@@ -1,13 +1,15 @@
 name: GEX levels
 
 # Pull CBOE's delayed option chains and write gex/latest.txt and gex/history.txt
-# (the one to paste into the TradingView dashboard), with Kronos forecasts added: once
+# (the one to paste into A.W. Strategy on TradingView), with Kronos forecasts added: once
 # before the US open, then every 30 minutes through the session. Run it by hand from the Actions tab
 # ("Run workflow") whenever you want fresh levels.
 on:
   schedule:
-    - cron: "45 12 * * 1-5"         # 8:45 New York in summer, 7:45 in winter
-    - cron: "15,45 13-21 * * 1-5"   # every 30 min, covering 9:30-16:00 New York all year
+    # GitHub delays or drops scheduled runs when it's busy, most of all at the top and
+    # half of the hour, so these run at odd minutes. Run it by hand when it matters.
+    - cron: "37 12 * * 1-5"         # 8:37 New York in summer, 7:37 in winter
+    - cron: "7,37 13-21 * * 1-5"    # every 30 min, covering 9:30-16:00 New York all year
   workflow_dispatch:
 
 permissions:

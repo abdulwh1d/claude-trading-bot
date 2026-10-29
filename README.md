@@ -1,383 +1,122 @@
-# Claude trading bot (paper trading)
+# A.W. Strategy
 
-Built from the X article "How to Build a 24/7 Trading System" (@eng_khairallah1, Oct 11 2026) plus
-tips from r/BuildWithClaude. Claude Opus 5.5 reads prices and news and writes a structured trade
-thesis. Plain Python decides whether a trade happens and how big it is. Alpaca's paper account
-executes with the stop attached to the order. A journal records every decision, including the
-trades the system refused, and a scorecard measures how accurate the analyst really is.
+[![GEX levels](https://github.com/abdulwh1d/claude-trading-bot/actions/workflows/gex-levels.yml/badge.svg)](https://github.com/abdulwh1d/claude-trading-bot/actions/workflows/gex-levels.yml)
+![Pine Script v6](https://img.shields.io/badge/Pine%20Script-v6-1e88e5)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776ab)
 
-> An engineering project, not financial advice. It trades paper money only. Most trading
-> strategies lose money, automated ones included, and an AI in the loop doesn't change that.
+A rules-based intraday futures strategy for TradingView, with an automated options-data pipeline
+and a paper-trading research bot.
 
-The `tradingview/` folder holds a separate futures dashboard for TradingView. It's described
-[at the end](#tradingview-futures-dashboard).
+A.W. Strategy trades index and metal futures (NQ/MNQ, ES/MES, RTY, YM, GC/MGC) on 1 to 30 minute
+charts. A trade needs three things to line up: **market structure** in its favour, a **reaction at
+a level** (a 79% retracement, a fair value gap, a swing anchored VWAP or a volume-profile level)
+and **order flow** behind it (intrabar delta, its z-score and a flow score). Dealer gamma (GEX)
+levels and the day's busiest option strikes, computed from CBOE data every 30 minutes, mark where
+price is likely to turn.
 
-## Setup
+> Research and engineering, not financial advice. The strategy has not shown an edge after costs
+> (see [Results](#results)). Trade it on paper.
 
-1. Install Python 3.10 or newer.
-2. In this folder:
-   ```
-   python -m venv .venv
-   source .venv/bin/activate        # Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-3. Copy `.env.example` to `.env` and fill it in:
-   - `ANTHROPIC_API_KEY` from console.anthropic.com
-   - `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` from your **paper** account at app.alpaca.markets
-   - optional: `SEC_USER_AGENT="Your Name you@example.com"` adds SEC filings to the overnight research
-4. Try it, step by step:
-   ```
-   python bot.py simulate         # offline run against a fake market. No keys needed.
-   python bot.py check            # keys work, account is paper, data and models reachable
-   python bot.py analyze NVDA     # one thesis and its risk verdict. No order.
-   python watchdog.py             # run 24/7; restarts the bot if it crashes
-   ```
-5. To stop everything, create a file named `KILL` in this folder (from a phone through any
-   file-sync app works too), or run `python bot.py kill`. Open orders are canceled, positions are
-   closed, and the bot exits.
+## How it trades
 
-The computer has to stay on and awake for "24/7". That's how the Reddit builder ran it too.
-
-## How it maps to the article
-
-| Article | Where |
+| Step | Rule |
 |---|---|
-| Step 1: stack, paper connection | `tradebot/broker.py`, `python bot.py check` |
-| Step 2: the thesis as a type | `tradebot/thesis.py` |
-| Step 3: news is untrusted input | `tradebot/untrusted.py` |
-| Step 4: the analyst (Opus 5.5) | `tradebot/analyst.py` |
-| Step 5: risk engine in plain code | `tradebot/risk.py`, numbers in `config.py` |
-| Step 6: execute on paper, stop attached | `tradebot/executor.py`, `tradebot/broker.py` |
-| Step 7: journal every decision | `tradebot/journal.py` |
-| Step 8: kill switch | `tradebot/killswitch.py` |
-| Step 9: the loop | `tradebot/loop.py` |
-| Step 10: cheap overnight shift (Sonnet 5.5, Batch API) | `tradebot/overnight.py`, `tradebot/filings.py` |
-| Before the open / after the close | `tradebot/premarket.py`, `tradebot/review.py` |
-| The backtesting trap | `tradebot/scorecard.py` grades forward, never on past news |
-| Reddit: watchdog, bracket orders, skipped trades, baselines, one falsifiable hypothesis a day | `watchdog.py`, `executor.py`, `scorecard.py`, `review.py` |
+| Context | The last break of structure (5-bar swings) goes the trade's way and the 30-minute chart agrees. Major structure (20-bar swings) and the swing-AVWAP regime add to the score. |
+| Location | Price touches the 79% retracement of the impulse leg, a fair value gap, the swing anchored VWAP or a volume-profile support/resistance, and the candle closes back off it. |
+| Confirmation | Gap reactions, intrabar delta (z-score, buyers' share, cumulative delta), relative volume and a −1 to +1 flow score. |
+| Timing | London and New York sessions only. |
+| Signal | At least 7 of 10 factors, on candle close (no repainting). |
+| Risk | Stop beyond the reaction candle and its zone plus 0.25 ATR, skipped if wider than 3 ATR. Targets at 1R and 2R, stop to breakeven after 1R, early exit on a structure flip or broken order flow. One contract per trade in the Strategy Tester. |
 
-## What I changed in the article's code, and why
+Ten more playbooks run alongside it (breakout, pullback, range, mean reversion, news, spread,
+scalping, order flow, GEX + order flow, GEX + anchored VWAP), each with its own record, and any of
+them can be backtested in the Strategy Tester. Full details: [docs/strategy.md](docs/strategy.md).
 
-1. **Its enum fix can't run.** Anthropic's docs confirm enum capitalization isn't guaranteed
-   ("Buy" instead of "buy"). But Pydantic rejects "Buy" inside `messages.parse()` before the
-   article's `.lower()` checks ever run, and its loop has no error handling, so the bot would
-   crash. The thesis model now normalizes case before validating.
-2. **The stop can expire overnight.** The article's order uses `TimeInForce.DAY`. Alpaca users
-   report the attached stop takes the entry's time in force, so it can lapse at the close.
-   Orders here are GTC, which is what Alpaca's own OTO and bracket examples use, and every cycle
-   re-attaches any stop that went missing.
-3. **It keeps buying the same stock.** The risk engine sizes each order, not each position, and
-   the loop runs every 15 minutes. A model that keeps saying "buy AAPL" adds another 5% each cycle.
-   Now there's one position per symbol.
-4. **"sell" was ambiguous.** The article's executor turns any non-buy into a sell order with a stop
-   attached, which opens a short. It also only checks stop direction for buys. Here "sell" closes
-   the long you hold. Shorting is off unless you enable it, and then a short's stop must sit above
-   entry.
-5. **Exits were blocked after a bad day.** The daily loss limit blocked every trade, including
-   selling to cut risk. Exits are always allowed now.
-6. **A hijacked thesis could trade the wrong stock.** If an injected headline makes the model
-   return NVDA while it's analyzing AAPL, the article sizes NVDA with AAPL's price. That's
-   rejected now.
-7. **Cost.** As written, the loop calls Opus for all 5 symbols every 15 minutes: about 130 calls a
-   day, mostly on identical inputs. Now a symbol is re-analyzed only on a new headline, a 1% move,
-   or a 2-hour-old thesis, and a hard daily cap ($5) applies. In simulation that cut calls by about 80%.
-8. **The kill switch took up to 15 minutes.** It's checked every 5 seconds now.
-9. **One error stopped everything.** A failed API call crashed the loop. Errors are journaled
-   instead, and a watchdog restarts the bot if it really does crash.
-10. **The journal didn't record what the system read.** The article promises that record, but its
-    code leaves it out. The price, headlines, model, effort and cost are now saved with every
-    decision, and the scorecard needs them.
-11. `messages.parse()` raises before you can read the token usage or `stop_reason` when the output
-    fails validation, which is exactly when refusals and `max_tokens` cutoffs happen. The analyst
-    does the same two steps by hand (send the schema, validate the text), so those calls are still
-    counted and journaled.
+## Results
 
-**What the article got right**, checked against Anthropic's docs and SDK source (anthropic 1.14.0)
-in October 2026. Opus 5.5 costs $4 / $20 per million tokens, and $2 / $10 through the Batch API.
-Sonnet 5.5 costs $2 / $10. Opus 5.5 has adaptive thinking always on, with a default effort of
-`medium`. Forced `tool_choice` returns a 400 error on Opus 5.5. Structured outputs through
-`client.messages.parse(output_format=...)` work as described. The enum capitalization caveat is
-real.
+TradingView Strategy Tester, default settings, one contract, $1.25 commission per contract per
+order and 1 tick of slippage, run on October 29, 2026:
 
-## Measuring accuracy
+| Market | Chart | Period | Trades | Won | Profit factor | Net | Max drawdown |
+|---|---|---|---|---|---|---|---|
+| MNQ | 15 min | Apr 30 – Oct 29, 2026 | 281 | 31.3% | 0.99 | −$206 | $2,559 |
+| NQ | 5 min | Sep 6 – Oct 29, 2026 | 177 | 31.1% | 0.97 | −$1,959 | $13,156 |
+| ES | 5 min | Sep 6 – Oct 29, 2026 | 162 | 26.5% | 0.82 | −$4,667 | $5,476 |
 
-You can't backtest this honestly. The model was trained on the past, so shown a 2025 headline it
-"predicts" what it already knows happened. So `scorecard.py` grades only forward: every thesis is
-saved when it's written and scored later against prices that came after it.
+Roughly breakeven on 15-minute MNQ and losing on 5-minute NQ and ES after costs. Longs did better
+than shorts over this rising market (MNQ 15 minutes: profit factor 1.25 long, 0.80 short). The
+minimum score of 7 was the best of four settings tested on the same data, which flatters it; see
+[docs/strategy.md](docs/strategy.md#backtest-results).
 
-`python bot.py scorecard` (also rebuilt after every close) reports:
+## Architecture
 
-- **Directional hit rate**: did the price move the way the thesis said, 1 and 5 sessions later?
-  It comes with a 95% confidence interval, compared against the always-buy baseline from the same
-  moments.
-- **Calibration**: are "high" confidence calls right more often than "medium" ones? It also
-  compares effort levels after `python bot.py compare-effort`.
-- **Approved vs rejected**: the hypothetical R-multiple of both groups. If the ideas the rules
-  rejected beat the ones they approved, the rules are filtering out winners.
-- **Holds**: how often a big move followed a "hold" (the moves you didn't trade).
-- **Account vs SPY buy-and-hold** over the same days, after API costs (before taxes).
+```mermaid
+flowchart LR
+    C[CBOE option chains] --> G[gex/gex_levels.py<br/>GEX and options-flow levels]
+    Y[Yahoo Finance bars] --> K[forecast/kronos_forecast.py<br/>Kronos 2-hour forecast]
+    G --> H[gex/history.txt]
+    K --> H
+    H -->|pasted into the settings| T[A.W. Strategy<br/>TradingView, Pine Script v6]
+    T --> A[Alerts and Strategy Tester]
+```
 
-Twenty identical "hold AAPL" calls in one morning count as one opinion, not twenty. Below 50
-observations the report labels every hit rate as noise. Expect mostly holds, so reaching a real
-sample will take a while. Waiting it out is how you find out whether this is skill or luck.
+A GitHub Action refreshes the levels during the session ([docs/data-pipeline.md](docs/data-pipeline.md)).
+The paper-trading bot is a separate research project on stocks ([docs/paper-bot.md](docs/paper-bot.md)).
 
-## What it costs
+## Quick start
 
-Alpaca's paper trading and its IEX data and news feed are free. Anthropic usage is billed per
-token. My rough estimate at the defaults is $15 to $35 a month: about 20 to 25 Opus calls per
-trading day, a few cents each, plus a small overnight batch and one daily review. The article's
-loop as written would cost about 5 times that. Actual spend is logged per call in
-`data/costs.jsonl` and summarized in the scorecard.
+**TradingView**
 
-## Commands
+1. Open the Pine Editor, paste [`tradingview/aw_strategy.pine`](tradingview/aw_strategy.pine),
+   save it as "A.W. Strategy" and click "Add to chart".
+2. Paste [`gex/history.txt`](gex/history.txt) into the settings under GEX levels.
+3. Create one alert on "A.W. Strategy" with "alert() function calls only" to get every entry and
+   exit with its stop and target.
 
-| Command | What it does |
-|---|---|
-| `python bot.py check` | Verify keys, paper account, market data, model access |
-| `python bot.py analyze NVDA MSFT` | Thesis and risk verdict now, no order (journaled as "shadow") |
-| `python bot.py compare-effort NVDA --levels medium,high` | Same inputs, several effort levels |
-| `python bot.py once` | One loop cycle now |
-| `python bot.py run` | Run 24/7 (prefer `python watchdog.py`) |
-| `python bot.py overnight --wait` | Submit the overnight research batch now and wait for it |
-| `python bot.py premarket` | Write today's pre-market brief now |
-| `python bot.py review` | After-close review: scorecard, daily CSV, one hypothesis |
-| `python bot.py scorecard` | Accuracy report |
-| `python bot.py pending` / `approve ID` / `reject ID` | Manual approval mode (see below) |
-| `python bot.py kill` | Emergency stop |
-| `python bot.py simulate --days 30 --kill-day 20` | Offline end-to-end run on a fake market |
-
-## Key settings (`config.py`)
-
-- Watchlist and allowed symbols: AAPL, MSFT, NVDA, SPY, QQQ.
-- Risk: 5% max position, 1% max risk per trade, 3% daily loss limit, 5 positions max, entries need
-  "high" confidence.
-- `TAKE_PROFIT_R = 2.0` puts a broker-side target at 2x the risk (a bracket order, the Reddit
-  tip). Set it to `None` for stop-only orders exactly as in the article.
-- `MANUAL_APPROVAL = True` is the article's stricter first phase. Approved entries wait in
-  `data/pending.jsonl` until you run `python bot.py approve <id>`, which re-checks them against
-  fresh prices first.
-- `ANALYST_EFFORT = "medium"`. Don't raise it by habit. Compare effort levels against the journal
-  first.
-- `MAX_DAILY_LLM_USD = 5.00`.
-
-## Files it writes
-
-- `data/journal.jsonl`: every decision (thesis, verdict, order, what it read, cost)
-- `data/events.jsonl`: kill switch, errors, re-attached stops, restarts
-- `data/costs.jsonl`: every model call and its price
-- `data/briefs/`: overnight research
-- `reports/scorecard.md`, `reports/daily_summary.csv`, `reports/hypotheses.jsonl`, `reports/premarket_*.md`
-- `logs/bot.log`
-
-## Going live
-
-Don't, until weeks of paper results have earned it. Even then the bot refuses unless
-`config.PAPER = False`, a file named `GO-LIVE` contains the sentence in `tradebot/golive.py`, and
-the journal shows at least 20 paper sessions.
-
-## Tests
+**Data pipeline**
 
 ```
-pip install pytest
+python gex/gex_levels.py              # GEX and options-flow levels from CBOE
+python forecast/kronos_forecast.py    # Kronos forecasts (needs torch and forecast/requirements.txt)
+```
+
+**Tests**
+
+```
+pip install -r requirements.txt
 pytest
 ```
 
-67 tests. They cover the article's worked example ($100,000 account, $180 entry, $170 stop:
-27 shares), every risk rule, injection handling, the kill switch, stop re-attachment, the budget
-cap and the scorecard math. Contract tests run the real `anthropic` and `alpaca-py` clients
-against local fake servers, so the exact requests the bot sends are checked without touching your
-accounts.
+## Repository layout
 
-## TradingView futures dashboard
+```
+tradingview/aw_strategy.pine   A.W. Strategy (Pine Script v6)
+gex/                           GEX and options-flow levels, and the files pasted into TradingView
+forecast/                      Kronos forecasts, the vendored model (MIT) and the forecast log
+tradebot/, bot.py, config.py   Paper-trading research bot (Alpaca paper account)
+tests/                         84 tests: GEX math, forecast scoring, the bot's risk rules and more
+docs/                          Strategy, data pipeline and bot documentation
+.github/workflows/             The scheduled GEX and forecast run
+```
 
-`tradingview/ict_confluence_dashboard.pine` is a Pine Script v6 indicator for NQ/MNQ, ES/MES and
-GC/MGC on 5 to 30 minute charts. It draws on your chart and fires alerts. It never places orders.
+## Credits
 
-**Install:** open the Pine Editor, paste the file over everything in it, save, then click
-"Add to chart".
+The strategy rebuilds ideas from these open-source projects in its own code:
 
-**What it reads**
-
-| Factor | How |
+| Project | Used for |
 |---|---|
-| Break of structure | A candle closes beyond the last pivot swing (5 bars each side). A break against the trend is labeled CHoCH. |
-| Fibonacci 79% | The 79% retracement of the leg that broke structure, drawn as a dashed line. |
-| FVG / IFVG | Three-candle gaps of at least 0.15 ATR. A gap that price closes through flips into an inverse FVG on the other side. Only the 6 nearest are drawn. |
-| Order flow | Each gap tap is *respected* (a reaction candle closes past its midpoint) or *disrespected* (closed through). The last 10 reactions set the bias. |
-| Delta | Built from 1-minute bars inside each candle: up-bar volume counts as buying and down-bar volume as selling. This approximates bid/ask delta, which TradingView only exposes on its top plans. It's judged three ways: a z-score against the last 30 bars (past ±1.5 is unusual), the buyers' share of the volume (60%+ means one side dominates), and the CVD trend over 5 bars (net delta the same way on most of them), not single spikes. Also flags CVD divergence at swings. |
-| Flow score | A −1 to +1 composite after [SuperFlow](https://github.com/profitnotiondaily/atasx-superflow), with its weights: absorption, delta z-score, big prints, effort vs result, CVD slope, rolling CVD and volume. ±0.5 is "in control", ±0.2 "leaning". Hover the row for each part. Its footprint-only parts (stacked imbalances, big resting orders) aren't available in Pine. |
-| Big prints | Circles where one 1-minute bar traded 4x the usual 1-minute volume, green if it closed up and red if down. The bigger the print, the bigger the circle: five sizes, at 1x, 1.5x, 2.25x, 3.5x and 5x that threshold. A bar-level stand-in for the trade bubbles of Bookmap-style tools like [OrderFlowMap](https://github.com/Azhagesan-dev/OrderFlowMap). |
-| Volume | Relative to the 20-bar average. |
-| GEX | Dealer gamma levels from the option chains: the gamma flip, the call and put walls, and the biggest GEX strikes that today's option volume confirms. See "GEX levels" below. |
-| Options flow | Today's busiest option strikes near price (OV markers), from the same chains. See "Options-flow levels" below. |
-| Timeframes | 5m, 15m and 30m structure. By default the 30m has to agree with the trade. Higher timeframes only use closed bars, and signals print on candle close, so they don't repaint. |
-| Session | London 02:00–05:00, NY AM 08:30–11:00, NY PM 13:30–15:30, New York time. |
-
-**Entries and exits.** A LONG or SHORT prints on candle close when structure and the 30m agree,
-price reacts at the 79% level or a gap, it's inside a session, and at least 5 of the 8 factors
-line up. Hover the label to see which ones. The stop goes beyond the reaction candle and its zone
-plus 0.25 ATR. Targets are 1R and 2R, and the stop moves to breakeven after 1R. SELL or COVER
-prints on the stop, the second target, a structure flip, or order flow being disrespected (a
-support gap closed through while long, a resistance gap while short). The "Now" row says what to
-wait for while you're flat.
-
-**Ten more strategies.** Ten playbooks run alongside the ICT signals. Each takes its own trades
-on candle close, prints its own small labels (▲ BO, ▼ RG and so on; hover one for the reason), and
-keeps its own record, which shows in the best long / short table.
-
-| Strategy | Entry | Stop | Exit |
-|---|---|---|---|
-| Breakout | A close outside a tight 20-bar range (under 3 ATR tall) on 1.5x volume | Inside the range, under the breakout candle | 2R or the range height projected, whichever is further |
-| Pullback | Trend up (structure plus 20 EMA over 50 EMA): a reversal candle at the 20 EMA, the 38–62% zone, or old resistance turned support | Under the last 5 bars | The last swing high |
-| Range | 2+ touches of each side over 40 bars with ADX under 25: a reversal candle or RSI divergence near an edge | Just outside the edge, plus 0.25 ATR | The middle first, then the far edge |
-| Mean reversion | A push outside the Bollinger band (20, 2) with RSI past 30/70, then a close back inside | Beyond the extreme of the push | The band middle (or VWAP) |
-| News | A real move at a usual release time (8:30, 10:00, 14:00 ET): wait 10 minutes, then buy or sell the first pullback | 0.5 ATR beyond the pullback | 0.75R (stop to breakeven), then 1.5R, or out after an hour |
-| Spread | NQ vs ES, or gold vs silver: the price ratio's z-score passes ±2 | z-score past ±3.5 | z-score back to 0. Scored in percent, not R |
-| Scalping | 1–5 minute charts only: 9 EMA over 21 and a break of the last micro swing | 0.5 ATR | 1.25R, or a close back through the 9 EMA |
-| Order flow | Absorption: heavy one-sided delta on high volume at a key level (session high or low, VWAP, the previous POC, a gap) while price doesn't follow, then a close back through that bar | Beyond the absorption bar | VWAP or the point of control, else 2R |
-| GEX + order flow | Price tests a GEX level (the flip, a wall or a big strike) and closes back on its side, with absorption on that bar or a delta reversal (sellers dominated the bar before and buyers dominate this one, or the reverse) | Beyond the level, plus 0.25 ATR | The next GEX level at least 1R away, else 2R |
-| GEX + AVWAP | See below. Reversal: price moves at least 1.5 ATR into a GEX level, holds it, and closes back through the VWAP anchored at the start of that move. Continuation: the level breaks while that AVWAP holds, price moves away, then a retest of the level holds | Reversal: beyond the test's extreme, plus 0.25 ATR. Continuation: beyond the level, plus 0.25 ATR, or a close back through the AVWAP | The next GEX level at least 1R away, else 2R |
-
-What TradingView can't do, and what stands in for it:
-
-- **Order flow:** there's no order book (DOM), time and sales, or footprint data in Pine on regular plans. Delta comes from 1-minute bars and the volume profile from 1-minute closes.
-- **News:** there's no economic calendar in Pine. It watches the usual release times and only trades when a real move happens there. Check a calendar for the day's events.
-- **Spread:** it shows both legs, but TradingView can't place a two-leg order.
-
-**Best long / short table.** A second table (bottom right) shows, for each side, the best plan
-right now: the strategy, entry, stop, exit, reward-to-risk, distance from price, and that
-strategy's record. Every strategy proposes a plan, and the table keeps those within 4 ATR of price
-that offer at least 1R. It then picks the one with the best record on the chart you're looking at.
-Records with few trades are discounted. An open trade always counts. Levels are estimates, not
-orders. GEX + order flow proposes a limit entry at the nearest GEX level on each side. GEX + AVWAP
-proposes its trigger once a level is being tested: a close through the AVWAP, or a limit at the
-broken level for the retest.
-
-**GEX + AVWAP.** From the video "Stop Guessing If a Gamma Exposure (GEX) Level Will Reverse — Use
-AVWAP" (Grateful Futures Trading University): GEX tells you *where* price may turn, and a VWAP
-anchored at the start of the move into the level tells you *whether* that move is still in
-control. The move's start is the highest high (for a drop into support) or lowest low (for a rally
-into resistance) of the last 48 bars, and the move has to be at least 1.5 ATR. While price stays on
-the move's side of the AVWAP, the move is in control; a close back through it means it lost
-control. The dashboard's "GEX + AVWAP" row says what the setup is waiting for, and the AVWAP is
-drawn in purple: solid while a level is being tested or a trade is open, dotted (from the current
-move's start) otherwise. An idea expires after 24 bars without a trigger. The look-back, the wait
-and the smallest move are in the settings under "GEX + anchored VWAP".
-
-**GEX levels.** Gamma exposure (GEX) estimates where options dealers' hedging pushes price or pins
-it, and order flow shows whether buyers or sellers actually win at those levels. The levels come
-from CBOE's free, delayed option chains: SPX plus SPY for ES, NDX plus QQQ for NQ, RUT plus IWM
-for RTY, DIA plus DJX for YM, and the ETFs GLD (gold), SLV (silver), USO (crude), UNG (natural gas)
-and TLT (bonds). The ETF-only ones are rougher stand-ins: the futures' own options aren't free.
-The ETF's options are moved onto the index's scale with the same dollar gamma and added in, since
-much of the hedging sits there (QQQ's open interest dwarfs NDX's), and strikes are grouped into
-5-point (SPX) and 25-point (NDX) buckets.
-`gex/gex_levels.py` computes them the way
-[Options-Gamma-Exposure-Analysis-Tool](https://github.com/CodeCraftIA/Options-Gamma-Exposure-Analysis-Tool)
-and [gex-explained](https://github.com/FlashAlpha-lab/gex-explained) do: GEX per contract = gamma ×
-open interest × 100 × spot² × 1%, calls positive and puts negative, expiries up to 60 days out. The
-gamma flip is where total GEX changes sign as spot moves (a Black-Scholes sweep from −10% to +10%).
-The call wall is the strike with the most positive GEX within 5% of spot and the put wall the
-most negative. The ladder is every strike within 2% of spot (the range a day trades in) holding
-at least 1% of the biggest one's GEX: about 60 levels for SPX, 30+ for NDX and 15 for GLD.
-
-A GitHub Action (`.github/workflows/gex-levels.yml`) runs it before the open (12:45 UTC) and
-every 30 minutes through the session, and commits `gex/latest.txt` and `gex/history.txt`. To
-refresh by hand: Actions → "GEX levels" → "Run workflow". Pine can't download files, so paste
-before the open and again whenever you want the latest levels (mid-morning and after lunch is
-plenty):
-
-1. Open `gex/history.txt` on GitHub and copy all of it.
-2. In the indicator's settings, paste it into "GEX levels (paste gex/history.txt)" under GEX levels.
-
-The levels are in the index's or ETF's own prices. The indicator moves them onto the futures with
-the futures-to-index ratio from regular-hours bars, so futures' premium over the index is taken
-care of. "GEX levels to show" in the settings picks how many:
-
-| Setting | What's drawn |
-|---|---|
-| Trusted only (default) | The call wall (thick green), the put wall (thick red) and the gamma flip (dashed orange), plus any of the 8 biggest GEX strikes where today's option volume is heavy too (tagged ★ flow), until it breaks. Gold, silver, crude, gas and bonds get only their walls and flip, since their levels come from an ETF's options. The GEX signals use the same levels. |
-| Strong levels | The walls, the flip and the 8 biggest strikes |
-| Full ladder | Also every strike within 1.5% of price ("Ladder range", up to 2%), green for positive GEX and red for negative, bolder the more gamma it holds |
-
-The walls and the 3 biggest strikes are grade A, the next 5 grade B. Every tag is a bounce level,
-L below price (support) and S above (resistance), with a live status for the day:
-
-| Status | Meaning |
-|---|---|
-| ✓ held | A candle tested it and closed back on its side with absorption or a delta flip |
-| ✗ broke (grey) | A candle closed through it with delta behind the move: don't fade it |
-| · retest (dimmed) | Touched before today without a result, so it's weaker |
-
-The GEX row adds the record, "held X/Y": of the strong levels that gave a result, how many held.
-Wait for the candle at the level to close, then enter on the pullback, not the spike. Lines start at the day's first snapshot, and the
-chart always shows the newest snapshot, even one taken over the weekend or before the open. The GEX row says whether
-price is above the flip (positive gamma: dealers damp moves, walls tend to hold) or below it
-(negative gamma: dealers amplify moves) and gives the next level above and below price; hover it
-for the walls. Levels more than 36 hours old are flagged.
-
-**Options-flow levels.** TradingView's built-in Options Volume Profile only draws on 1D and up,
-and Pine can't read another indicator's data. So the Action also records, for each underlying,
-the 8 strikes within 2% of price with the most option volume today (calls and puts, ETF contracts
-counted in index-sized ones), and the chart marks the busiest 4 ("Options-flow levels to mark")
-on every timeframe as dotted OV lines: teal when calls dominate, pink when puts do, white when
-they're even. A busy strike that also carries big GEX shows as ★ flow on the GEX tag instead.
-These come from the index and ETF options (NDX + QQQ for NQ), not the CME futures options the
-Options Volume Profile reads, so the strikes are close but not identical.
-
-**Kronos forecast.** [Kronos](https://github.com/shiyu-coder/Kronos) is an open-source foundation
-model trained on candlestick data from 45 exchanges. `forecast/kronos_forecast.py` (Kronos-small,
-vendored under `forecast/model/` with its MIT license) runs in the same Action every 30 minutes:
-it pulls the last few days of 5-minute bars for NQ, ES, RTY, YM and gold from Yahoo Finance and
-forecasts the next 2 hours. The "Kronos 2h" row shows the forecast close in 1 and 2 hours and
-how many of its recent 1-hour direction calls were right (scored after the fact in
-`forecast/log.csv`). It stays grey until at least 10 calls are scored and 55% were right. It's an
-experiment: don't trade it on its own.
-
-history.txt keeps the first run of each day and each underlying's newest run, with the full
-ladder and the volume levels only on the newest run (older runs keep their 8 biggest strikes, which
-is all the signals use) and only the newest forecast, so it stays under Pine's 40,960-character
-limit, and the
-GEX + order flow record covers every day since the Action started. There's no free source of past
-GEX, so that record only builds forward from Oct 21 2026: give it a few weeks before trusting it.
-GEX rests on assumptions about who is long and short the options (dealers long calls and short
-puts), the chains are 15 minutes delayed and open interest updates once a day. Both GEX and order
-flow are probabilistic, and order flow is noisy outside liquid sessions.
-
-Panel positions, text size, which strategies run and every threshold above are in the
-indicator's settings.
-
-**Alerts.** Create alert → Condition "ICT Confluence Dashboard" → "Any alert() function call".
-One alert then covers every entry and exit, ICT and the ten strategies, with the stop and
-target in the message. The named conditions (long, short, sell, cover, strategy entry) work too.
-
-**Data.** On TradingView's free plan, CME and COMEX futures are delayed (the "D" badge on the
-chart). Live signals need TradingView's real-time CME data add-on.
-
-**History.** These are the dashboard's own stats over the history TradingView loaded on
-Oct 15 2026, before fees and slippage:
-
-| | 5 min | 15 min | 30 min |
-|---|---|---|---|
-| NQ | 92 trades, 33% won, +0.04R | 161 trades, 28% won, −0.02R | 327 trades, 33% won, +0.07R |
-| ES | 81 trades, 30% won, +0.05R | 175 trades, 27% won, −0.03R | 317 trades, 29% won, 0R |
-| GC | 70 trades, 23% won, −0.14R | 175 trades, 24% won, −0.11R | 326 trades, 27% won, −0.08R |
-
-That's roughly breakeven on the index futures and negative on gold. Use it as a checklist that
-marks the setups, not as proof of an edge.
-
-How far back the records go depends on how much history TradingView loads for the chart. On the
-free plan in October 2026 that was about four weeks on 5 minutes and back to January on 30
-minutes. The History row prints its start date. Records built on a handful of trades mean little.
-
-## From the starred repos
-
-| Repo | Used for |
-|---|---|
-| [Kronos](https://github.com/shiyu-coder/Kronos) | The 2-hour forecast row (above) |
+| Market Structure by Leviathan | Major swings and breaks of structure |
+| HaP AVWAP / Anchored VWAP by agahakanaga | Swing anchored VWAPs and their regime |
+| Buyers & Sellers Profile + Dynamic S/R by Zeiierman | Volume-profile support and resistance |
 | [SuperFlow](https://github.com/profitnotiondaily/atasx-superflow) | The flow score's parts and weights |
-| [OrderFlowMap](https://github.com/Azhagesan-dev/OrderFlowMap) | The big-print bubbles |
-| [Options-Gamma-Exposure-Analysis-Tool](https://github.com/CodeCraftIA/Options-Gamma-Exposure-Analysis-Tool), [gex-explained](https://github.com/FlashAlpha-lab/gex-explained) | The GEX math |
-| [nautilus_trader](https://github.com/nautechsystems/nautilus_trader), [Nautilus-Web-Interface](https://github.com/Black101081/Nautilus-Web-Interface) | Not used: a full trading engine and its web UI. The natural next step if the bot ever trades futures automatically or needs tick-level backtests, but nothing in it runs inside TradingView |
-| [prediction-market-backtesting](https://github.com/evan-kolberg/prediction-market-backtesting) | Not used: backtests Kalshi and Polymarket prediction markets, not futures |
-| [skfolio](https://github.com/skfolio/skfolio) | Not used: portfolio weights across many stocks, not single-market day trades |
+| [OrderFlowMap](https://github.com/Azhagesan-dev/OrderFlowMap) | Big-print bubbles |
+| [gex-explained](https://github.com/FlashAlpha-lab/gex-explained), [Options-Gamma-Exposure-Analysis-Tool](https://github.com/CodeCraftIA/Options-Gamma-Exposure-Analysis-Tool) | The GEX math |
+| [Kronos](https://github.com/shiyu-coder/Kronos) | The 2-hour forecast |
+| "Stop Guessing If a Gamma Exposure (GEX) Level Will Reverse — Use AVWAP", Grateful Futures Trading University | The GEX + anchored VWAP playbook |
+
+Looked at and not used: [nautilus_trader](https://github.com/nautechsystems/nautilus_trader) and
+[Nautilus-Web-Interface](https://github.com/Black101081/Nautilus-Web-Interface) (a full trading
+engine and its web UI; the natural next step for automated execution or tick-level backtests),
+[prediction-market-backtesting](https://github.com/evan-kolberg/prediction-market-backtesting)
+(prediction markets, not futures) and [skfolio](https://github.com/skfolio/skfolio) (portfolio
+allocation across many assets).
