@@ -110,35 +110,6 @@ Properties:
 Stops and targets rest as orders, so they fill inside the bar; rule-based exits (a structure
 flip, order flow disrespected, a time stop) fill at the next bar's open.
 
-## Backtest results
-
-The A.W. signal with default settings, from TradingView's Strategy Tester on October 29, 2026,
-including commission and slippage:
-
-| Market | Chart | Period | Trades | Won | Profit factor | Net (1 contract) | Max drawdown |
-|---|---|---|---|---|---|---|---|
-| MNQ | 15 min | Apr 30 – Oct 29, 2026 | 281 | 31.3% | 0.99 | −$206 | $2,559 |
-| NQ | 5 min | Sep 6 – Oct 29, 2026 | 177 | 31.1% | 0.97 | −$1,959 | $13,156 |
-| ES | 5 min | Sep 6 – Oct 29, 2026 | 162 | 26.5% | 0.82 | −$4,667 | $5,476 |
-
-That is roughly breakeven on MNQ 15 minutes and a loss on 5-minute NQ and ES after costs: no
-edge yet. On MNQ 15 minutes longs made money (profit factor 1.25) and shorts lost (0.80) over a
-rising market.
-
-How the minimum score was chosen, on MNQ 15 minutes:
-
-| Setting | Trades | Profit factor | Net |
-|---|---|---|---|
-| The old eight factors only (the folded-in indicators off) | 292 | 0.93 | −$1,411 |
-| All ten factors, 6 of 10 | 314 | 0.94 | −$1,351 |
-| All ten factors, 7 of 10 (default) | 281 | 0.99 | −$206 |
-| All ten factors, 8 of 10 | 187 | 0.89 | −$1,482 |
-
-7 of 10 also beat 6 of 10 on NQ 5 minutes (0.97 against 0.92) and ES 5 minutes (0.82 against
-0.80). These are a few months of one market regime, and choosing the best of four settings on the
-same data flatters it. Treat the strategy as a checklist that marks setups, not as proof of an
-edge. How far back a backtest goes depends on how much history TradingView loads for the chart.
-
 ## Ten more playbooks
 
 Each takes its own trades on candle close, prints its own small labels (▲ BO, ▼ RG and so on;
